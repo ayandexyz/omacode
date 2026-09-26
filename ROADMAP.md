@@ -109,6 +109,24 @@ behind a setting (`shells.notifyOnExit`, plus the usual
 `FREECODE_DISABLE_*` escape hatch), and decide explicitly whether a completion
 may interrupt a turn already in progress or must wait for it.
 
+## Parallel foreground subagents (added 2026-09-27)
+
+**Status:** not built. Found by the `delegation` eval suite.
+
+Two `agent` calls in one response run one after another: `agent` has
+`isConcurrencySafe: false`, and `tools/batching.ts` decides by tool **name**
+(`IsConcurrencySafeFn = (toolName) => boolean`). Claude Opus 5 parallelizes
+with `run_in_background` (3/3); MiniMax-M3 batches two foreground calls
+instead (0/3 before and 0/3 after the description said foreground calls are
+sequential), which is the normal way a model asks for parallel tool calls.
+
+Fix: let batching consult the call's arguments, and treat an `agent` call
+with `readOnly` not `false` as concurrency-safe. A read-only subagent
+cannot see write/edit/bash (explore mode filters them), so two of them
+cannot race on the tree. Writing subagents stay sequential. The results then
+come back in one follow-up call, which is the
+`extras/background-completions` rule in its best form.
+
 ## Subagent permission profiles (added 2026-09-08)
 
 Blocked on user-defined subagents (Extensibility item 3). The dead-code half of this (`PROFILES`, `PermissionChecker`, duplicate `PermissionProfile` interface) is also tracked under Tool system in `TODO.md`.

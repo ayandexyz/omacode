@@ -451,6 +451,10 @@ export class AgentLoop {
   // (agent/task-notify.ts) ride the same queue so a background result lands
   // mid-turn instead of waiting for the run to end.
   private pendingSteers: PendingSteer[] = [];
+  // The provider/model this run was asked to use, handed to tools so a
+  // subagent runs on the same model as its parent. Session meta cannot answer
+  // that: the model is usually chosen per turn and never written there.
+  private runModel: { provider?: string; model?: string } = {};
   // Loop-health reasons already turned into a reminder this run.
   private healthWarned = new Set<string>();
   private turnsSinceTodoWrite = 0;
@@ -764,6 +768,7 @@ export class AgentLoop {
     };
     // Fresh cancellation scope per run
     this.abort = new AbortController();
+    this.runModel = { provider: input.provider, model: input.model };
 
     // Reset per-run reminder state (this instance is reused across turns).
     this.recentToolCalls = [];
@@ -3061,6 +3066,8 @@ export class AgentLoop {
       // whole of a build (see bash.ts).
       toolCallId: toolCall.id,
       agentMode: this.state.agentMode,
+      provider: this.runModel.provider,
+      model: this.runModel.model,
       abort: this.abort.signal,
     };
 

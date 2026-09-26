@@ -8,7 +8,7 @@ import { baselineFor, writeReport } from "./report.js";
 import { subscriptionAuth } from "../providers/config.js";
 import { resolveJudge } from "./judge-config.js";
 import { loadQuarantine } from "./quarantine.js";
-import { initRunner, runTrial } from "./runner.js";
+import { initRunner, runTrial, shutdownRunner } from "./runner.js";
 import type { CaseResult, SuiteReport, TrialResult } from "./types.js";
 
 export interface RunSuiteOptions {
@@ -65,14 +65,18 @@ export async function runSuite(
   }
 
   const results: CaseResult[] = [];
-  for (const kase of cases) {
-    const trials: TrialResult[] = [];
-    for (let i = 0; i < options.trials; i++) {
-      trials.push(await runTrial(kase, config));
+  try {
+    for (const kase of cases) {
+      const trials: TrialResult[] = [];
+      for (let i = 0; i < options.trials; i++) {
+        trials.push(await runTrial(kase, config));
+      }
+      const result = summarise(kase.id, trials, quarantined.has(kase.id));
+      results.push(result);
+      options.onCase?.(result);
     }
-    const result = summarise(kase.id, trials, quarantined.has(kase.id));
-    results.push(result);
-    options.onCase?.(result);
+  } finally {
+    await shutdownRunner();
   }
 
   const blocking = results.filter((c) => !c.quarantined);

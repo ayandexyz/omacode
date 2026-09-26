@@ -150,3 +150,30 @@ test("the env flag beats the settings files; default is on", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a subagent runs on the parent run's model, not the provider default", async () => {
+  const project = mkdtempSync(join(tmpdir(), "freecode-agent-bg-project-"));
+  const { createSessionStore } = await import("../session/store.js");
+  try {
+    const result = await AgentTool.execute(
+      { task: "t", prompt: "p" },
+      {
+        sessionId: "root-model",
+        cwd: project,
+        projectPath: project,
+        provider: "bg-fake",
+        model: "fake-model-x",
+        hooks: createHookRuntime(),
+      } as never,
+    );
+    assert.equal(result.success, true);
+    const id = result.success ? String(result.result.metadata?.subagentId) : "";
+    const store = await createSessionStore(join(home, ".freecode"));
+    const meta = await store.getMeta(id, project);
+    assert.equal(meta?.provider, "bg-fake");
+    assert.equal(meta?.model, "fake-model-x");
+  } finally {
+    getAgentRegistry().disposeRoot("root-model");
+    rmSync(project, { recursive: true, force: true });
+  }
+});

@@ -61,12 +61,12 @@ const agentSchema: JsonSchema = {
     readOnly: {
       type: "boolean",
       description:
-        "Defaults to true: the sub-agent runs read-only and physically cannot see write/edit/bash, so it cannot change anything. Set false ONLY when the task is to modify code — the sub-agent then inherits this session's permission mode.",
+        "Defaults to true: the sub-agent runs read-only and physically cannot see write/edit/bash, so it cannot change anything. If the task is to write or edit files you MUST set false, or the sub-agent cannot do it — it then inherits this session's permission mode.",
     },
     run_in_background: {
       type: "boolean",
       description:
-        "If true, return immediately and keep working (or end your turn) while the sub-agent runs. Its result arrives later as a <task-notification> message — do not poll or wait for it.",
+        "If true, return immediately and keep working (or end your turn) while the sub-agent runs. Its result arrives later as a <task-notification> message — do not poll or wait for it. Required for sub-agents to run at the same time: several foreground agent calls run one after another.",
     },
   },
   required: ["task", "prompt"],
@@ -151,6 +151,13 @@ async function executeSubagent(
       ? params.agentType
       : undefined;
   let model: string | undefined;
+  // The parent run's own model first: session meta usually has none (the
+  // model is chosen per turn), and the provider's default then silently
+  // stood in — a MiniMax-M3 session delegated to MiniMax-M2.
+  if (!provider && ctx.provider) {
+    provider = ctx.provider;
+    model = ctx.model;
+  }
   if (!provider && ctx.sessionId) {
     const parentMeta = await sessionStore.getMeta(
       ctx.sessionId,
@@ -457,10 +464,10 @@ export const AgentTool: Tool<AgentParams> = buildTool({
 Use it when the work would burn context you have no further use for ("find everywhere X is wired up", "why is this test flaky"). Don't use it for work you can do directly — a known read, a single grep, an understood edit is faster inline.
 
 - Put everything it needs in \`prompt\`: it starts cold unless forkContext: true (forks this session into it). Say exactly what you want back.
-- It is READ-ONLY by default and cannot write, edit, or run bash. Pass readOnly: false only when the task is to change code; it then runs with this session's permissions.
+- It is READ-ONLY by default and cannot write, edit, or run bash. When the task is to change code you must pass readOnly: false, or it will fail; it then runs with this session's permissions.
 - It cannot spawn sub-agents of its own. If your task needs delegating twice, do the outer half yourself.
 - Its result is not shown to the user — relay what matters yourself.
-- run_in_background: true returns at once and delivers the result later as a <task-notification>. Use it for long work you don't need before your next step, or to run several agents in parallel.`,
+- run_in_background: true returns at once and delivers the result later as a <task-notification>. Use it for long work you don't need before your next step. To run several agents in parallel, set it on each: foreground agent calls run one after another, even when made in the same response.`,
   schemas: {
     parameters: agentSchema,
   },
