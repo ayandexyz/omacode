@@ -19,6 +19,8 @@ const agent = (over: Partial<AgentSummary> = {}): AgentSummary => ({
   parentId: "root",
   rootId: "root",
   task: "Find every call site",
+  prompt: "",
+  background: false,
   agentType: "agent",
   depth: 1,
   status: "running",

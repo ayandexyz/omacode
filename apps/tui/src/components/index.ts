@@ -228,6 +228,12 @@ export function loadSessionMessages(messages: SerializedMessage[]): void {
       createSystemMessage("*Rewound here — the branch that followed was summarized for the agent.*");
       continue;
     }
+    // A background task's result handed to the agent. The XML is for the
+    // model; the agent's reply that follows is what the user reads.
+    if (msg.synthetic === "task_notification") {
+      createSystemMessage("*A background task finished and was reported to the agent.*");
+      continue;
+    }
     let content = "";
     if (msg.role === "user") {
       content = msg.parts

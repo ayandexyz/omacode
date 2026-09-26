@@ -42,7 +42,23 @@ open questions, chiefly non-git projects, are the remaining work.)
 
 ## Background shell completion notifications (added 2026-09-08)
 
-**Status:** designed, not built. Follow-up to the background-bash work (ex-item 6).
+**Status:** delivery built 2026-09-27 for **background subagents only**
+(`agent(run_in_background: true)`); shells are not wired yet. Follow-up to the
+background-bash work (ex-item 6).
+
+What exists now: `agent/task-notify.ts` formats the `<task-notification>` and
+owns the switch (`tasks.notify`, `FREECODE_TASK_NOTIFY`, **default on** — the
+user chose Claude Code's behaviour over the default-off below). `server.ts`
+installs the sink: mid-turn a notification rides `AgentLoop.steer()` and lands
+at the next tool-batch boundary (persisted `synthetic: "task_notification"`);
+idle, it starts a turn (the idle watcher below), coalescing a 250ms burst into
+one turn, with `startingTurns` guarding the window before `activeLoops.set`. An
+undelivered one is re-queued as a notification, not a follow-up. With the
+switch off, `run_in_background` runs the agent in the foreground.
+
+Remaining for shells: call `notifyTask` from the `onExit` in `tools/bash.ts`
+`startBackground`, and suppress it when the model already drained the shell to
+completion via `bashoutput`.
 
 Today a background shell is **pull-only**: the model learns a command finished
 only by calling `bashoutput`, and it has no reason to call it once the turn has

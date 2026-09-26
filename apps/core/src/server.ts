@@ -109,6 +109,7 @@ import { startGraphExplorer } from "./graph-explorer/server.js";
 import { openBrowser } from "./utils/open-browser.js";
 import { randomUUID } from "crypto";
 import { createRecorder } from "./rollout/recorder.js";
+import { setTaskNotificationSink } from "./agent/task-notify.js";
 import { CheckpointService } from "./checkpoint/index.js";
 import type { SerializedMessage } from "./session/store.js";
 import type { FileChange } from "./checkpoint/index.js";
@@ -170,6 +171,105 @@ function getOrCreateQueue(sessionId: string): MessageQueue {
   return q;
 }
 
+// Sessions inside runSessionTurn but not yet in activeLoops: the loop is built
+// behind an await, and a notification flushed in that window must not start a
+// second turn on the same session.
+const startingTurns = new Set<string>();
+
+// Task notifications (agent/task-notify.ts) waiting to be delivered. Buffered
+// briefly so a burst — several background agents finishing together — becomes
+// one turn, not one per task.
+const pendingNotifications = new Map<string, string[]>();
+const notificationTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const NOTIFY_COALESCE_MS = 250;
+
+function queueTaskNotification(sessionId: string, text: string): void {
+  const list = pendingNotifications.get(sessionId) ?? [];
+  list.push(text);
+  pendingNotifications.set(sessionId, list);
+  scheduleNotificationFlush(sessionId);
+}
+
+function scheduleNotificationFlush(sessionId: string): void {
+  if (notificationTimers.has(sessionId)) return;
+  notificationTimers.set(
+    sessionId,
+    setTimeout(() => {
+      notificationTimers.delete(sessionId);
+      flushTaskNotifications(sessionId);
+    }, NOTIFY_COALESCE_MS),
+  );
+}
+
+/**
+ * Mid-turn: each notification rides the steer path and lands at the next
+ * tool-batch boundary. Idle: one turn starts with all of them. A session that
+ * is gone (ended, deleted, core restarted) drops them — nobody is listening.
+ */
+function flushTaskNotifications(sessionId: string): void {
+  const texts = pendingNotifications.get(sessionId);
+  if (!texts?.length) return;
+  const session = getSession(sessionId);
+  if (!session) {
+    pendingNotifications.delete(sessionId);
+    return;
+  }
+  if (startingTurns.has(sessionId)) {
+    scheduleNotificationFlush(sessionId);
+    return;
+  }
+  pendingNotifications.delete(sessionId);
+  const active = activeLoops.get(sessionId);
+  if (active) {
+    for (const text of texts) {
+      active.steer(text, randomUUID(), "task_notification");
+    }
+    return;
+  }
+  const { provider, model } = resolveProviderModel(session);
+  if (!provider) {
+    logger.warn("Task notification dropped: no provider", { sessionId });
+    return;
+  }
+  runSessionTurn(session, {
+    prompt: texts.join("\n\n"),
+    provider,
+    model,
+    effort: session.effort,
+    agentMode: (session as unknown as Record<string, unknown>).agentMode as
+      | AgentMode
+      | undefined,
+    synthetic: "task_notification",
+  }).catch((err) => {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error("Task notification turn failed", { sessionId, message });
+  });
+}
+
+setTaskNotificationSink((sessionId, text, notice) => {
+  BusEvents.stream(sessionId, {
+    type: "notice",
+    level: "info",
+    content: notice,
+  });
+  queueTaskNotification(sessionId, text);
+});
+
+/**
+ * Provider and model for a turn: an explicit per-call override first, then
+ * config.json, then whatever the session was pinned to at start.
+ */
+function resolveProviderModel(
+  session: SessionInfo,
+  modelOverride?: string,
+): { provider?: string; model?: string } {
+  const config = readConfig();
+  return {
+    provider: config.current?.provider || session.provider,
+    model: modelOverride || config.current?.model || session.model,
+  };
+}
+
 interface ToolListItem {
   id: string;
   description: string;
@@ -205,6 +305,7 @@ interface TurnInput {
   model?: string;
   effort?: EffortLevel;
   agentMode?: "plan" | "build" | "review" | "explore" | "danger";
+  synthetic?: "task_notification";
 }
 
 /**
@@ -230,9 +331,13 @@ async function runSessionTurn(
   // No maxIterations override: interactive sessions run unbounded, same as
   // Claude Code and opencode. loop-health + the todo/verify gates are what
   // end a run in practice.
-  const loop = await getAppRuntime().runPromise(
-    createAgentLoopEffect(sessionId),
-  );
+  startingTurns.add(sessionId);
+  let loop: AgentLoop;
+  try {
+    loop = await getAppRuntime().runPromise(createAgentLoopEffect(sessionId));
+  } finally {
+    startingTurns.delete(sessionId);
+  }
   activeLoops.set(sessionId, loop);
 
   // Per-turn store handle for title-pinning below. Cheap (effect runtime
@@ -252,6 +357,7 @@ async function runSessionTurn(
         projectPath: session.projectPath,
         agentMode: input.agentMode,
         images: input.images,
+        synthetic: input.synthetic,
       }),
     );
 
@@ -261,8 +367,14 @@ async function runSessionTurn(
       content: result.message || "Done",
     });
 
-    // Extract session title from first response (no extra API call).
-    if (result.success && result.turnCount > 0 && result.content) {
+    // Extract session title from first response (no extra API call). A
+    // notification turn's prompt is harness XML, never a title.
+    if (
+      result.success &&
+      result.turnCount > 0 &&
+      result.content &&
+      !input.synthetic
+    ) {
       const titleMatch = result.content.match(/SESSION_TITLE:\s*(.+)/i);
       const title = titleMatch
         ? titleMatch[1].trim()
@@ -278,7 +390,13 @@ async function runSessionTurn(
     // A steer that arrived after the loop's last drain point never reached
     // the model. Re-park it as a follow-up so the user's words still get a
     // turn; the TUI already shows it as queued.
-    for (const text of loop.takeUndeliveredSteers()) {
+    for (const { text, synthetic } of loop.takeUndeliveredSteers()) {
+      // A notification goes back through its own path, which delivers it to
+      // whichever turn comes next — or starts one once this session is idle.
+      if (synthetic === "task_notification") {
+        queueTaskNotification(sessionId, text);
+        continue;
+      }
       const id = getOrCreateQueue(sessionId).enqueue(text);
       BusEvents.stream(sessionId, {
         type: "message_queued",
@@ -625,8 +743,8 @@ export const methodHandlers: Record<
     // while model preferred the session — so editing config.json mid-session
     // could switch the provider while leaving the model behind, producing
     // mismatched pairs like provider "openai" with model "MiniMax-M3".
-    const config = readConfig();
-    const currentProvider = config.current?.provider || session.provider;
+    const { provider: currentProvider, model: currentModel } =
+      resolveProviderModel(session, model);
     if (!currentProvider) {
       throw new Error(
         "No provider configured. Pick one with /model, or set current.provider " +
@@ -639,7 +757,6 @@ export const methodHandlers: Record<
     if (model) {
       session.model = model;
     }
-    const currentModel = model || config.current?.model || session.model;
     if (effort) {
       session.effort = effort;
     }

@@ -198,6 +198,14 @@ import {
 // working for tests and legacy call sites.
 // =============================================================================
 
+/** A message waiting for the next tool-batch boundary — see steer(). */
+export interface PendingSteer {
+  id: string;
+  text: string;
+  /** "steer": the user typed it; "task_notification": a background task finished. */
+  synthetic: "steer" | "task_notification";
+}
+
 // How many times a single run may compact in response to the provider
 // rejecting the request as too long. Each attempt is a full round trip, so an
 // unbounded retry loop is expensive and, when compaction cannot free enough,
@@ -439,8 +447,10 @@ export class AgentLoop {
   // Steering queue (spec 2026-09-20-pi-parity-plan, Phase 1): user messages
   // that arrived mid-turn. Drained into the transcript between one tool batch
   // and the next model call — see drainSteers(). Distinct from the server's
-  // follow-up queue, which waits for the run to end.
-  private pendingSteers: Array<{ id: string; text: string }> = [];
+  // follow-up queue, which waits for the run to end. Task notifications
+  // (agent/task-notify.ts) ride the same queue so a background result lands
+  // mid-turn instead of waiting for the run to end.
+  private pendingSteers: PendingSteer[] = [];
   // Loop-health reasons already turned into a reminder this run.
   private healthWarned = new Set<string>();
   private turnsSinceTodoWrite = 0;
@@ -759,7 +769,10 @@ export class AgentLoop {
     this.recentToolCalls = [];
     this.recentEdits = [];
     this.pendingReminders = [];
-    this.pendingSteers = [];
+    // pendingSteers is NOT reset here: the server can steer this loop (a
+    // task notification can land at any moment) between registering it as
+    // active and run() starting, and a reset would drop that message.
+    // Leftovers are emptied at the end by takeUndeliveredSteers().
     this.healthWarned = new Set<string>();
     this.turnsSinceTodoWrite = 0;
     this.turnsSinceLastNudge = 0;
@@ -896,7 +909,7 @@ export class AgentLoop {
       await this.appendUserMessage(
         input.prompt,
         imageParts,
-        {},
+        input.synthetic ? { synthetic: input.synthetic } : {},
         initialUserMessage.id,
       );
       this.memory.addMessage("user", input.prompt);
@@ -3350,15 +3363,20 @@ export class AgentLoop {
   // routes to the follow-up queue instead when no loop is active, and a
   // steer left over at completion is returned by takeUndeliveredSteers().
   // ===========================================================================
-  steer(text: string, id: string = randomUUID()): void {
-    this.pendingSteers.push({ id, text });
+  steer(
+    text: string,
+    id: string = randomUUID(),
+    synthetic: PendingSteer["synthetic"] = "steer",
+  ): void {
+    this.pendingSteers.push({ id, text, synthetic });
   }
 
   // Steers that never reached the model because the run ended (interrupt,
   // failure, hard stop) before the next drain point. The server re-parks
-  // them as follow-ups so a user's words are never dropped.
-  takeUndeliveredSteers(): string[] {
-    const left = this.pendingSteers.map((s) => s.text);
+  // them — a user's words as follow-ups, a notification as a notification —
+  // so neither is ever dropped.
+  takeUndeliveredSteers(): PendingSteer[] {
+    const left = this.pendingSteers;
     this.pendingSteers = [];
     return left;
   }
@@ -3383,7 +3401,7 @@ export class AgentLoop {
     // fingerprint no longer describes this list — an unchanged list after a
     // steer is a fresh stop, not a repeat.
     this.pokeState = { ...this.pokeState, lastFingerprint: undefined };
-    for (const { id, text } of batch) {
+    for (const { id, text, synthetic } of batch) {
       this.history.push({
         id,
         role: "user",
@@ -3391,16 +3409,20 @@ export class AgentLoop {
         timestamp: Date.now(),
       });
       this.memory.addMessage("user", text);
-      await this.appendUserMessage(text, [], { synthetic: "steer" }, id);
+      await this.appendUserMessage(text, [], { synthetic }, id);
       this.recorder.recordMessageSteered(turnId, {
         messageId: id,
         remaining: this.pendingSteers.length,
       });
-      BusEvents.stream(this.state.sessionId, {
-        type: "message_steered",
-        id,
-        content: text,
-      });
+      // A notification never had a queued row to promote; the server already
+      // told the frontend with a notice when it arrived.
+      if (synthetic === "steer") {
+        BusEvents.stream(this.state.sessionId, {
+          type: "message_steered",
+          id,
+          content: text,
+        });
+      }
     }
     return true;
   }

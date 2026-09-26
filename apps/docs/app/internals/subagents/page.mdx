@@ -23,6 +23,8 @@ interface AgentParams {
   prompt: string;
   agentType?: string;   // optional provider override
   forkContext?: boolean; // start with the parent's full conversation instead of just the prompt
+  readOnly?: boolean;    // default true → explore mode; false inherits the parent's mode
+  run_in_background?: boolean; // return at once; result arrives as a task notification
 }
 ```
 
@@ -35,6 +37,48 @@ the sub-agent needs to *continue* work the parent already has context for;
 leave it off for a fresh, independent investigation (exploring, reviewing) —
 which is both cheaper and keeps the sub-agent from anchoring on the parent's
 assumptions.
+
+## Background spawns and task notifications
+
+`run_in_background: true` changes only **when** the parent gets the result.
+`executeSubagent` does all the setup it always does (session, registry entry,
+`agent_start`), then wraps the run in `runToCompletion()`. Foreground awaits
+it; background fires it off and returns `Started in the background as <id>`.
+When it settles, `notifyTask(parentSessionId, …)` (`agent/task-notify.ts`)
+formats a `<task-notification>` and hands it to the sink `server.ts`
+installed:
+
+```text
+sink(sessionId, text, notice)
+  → notice StreamEvent             (the user sees one line)
+  → pendingNotifications[session]  (250 ms coalesce timer)
+  → flush:
+      session gone              → drop
+      startingTurns.has(id)     → reschedule (loop not built yet)
+      activeLoops.get(id)       → loop.steer(text, id, "task_notification")
+      otherwise                 → runSessionTurn({ prompt, synthetic: "task_notification" })
+```
+
+Three details keep this correct:
+
+- **`startingTurns`.** `runSessionTurn` builds its loop behind an `await`
+  before `activeLoops.set`. A flush in that window would see an idle session
+  and start a second, concurrent turn, so the set marks the window as busy.
+- **`run()` no longer clears `pendingSteers`.** A notification can be steered
+  onto a loop between registration and `run()` starting. `takeUndeliveredSteers()`
+  already empties the queue at the end of every run, so the reset only ever
+  dropped messages.
+- **Undelivered notifications go back as notifications.** A steer the run
+  ended before draining returns as a `PendingSteer` carrying its `synthetic`
+  kind. A user's steer is re-queued as a follow-up, as before. A notification
+  re-enters `queueTaskNotification`, which delivers it to whatever turn comes
+  next, or starts one.
+
+The persisted message is `synthetic: "task_notification"`: harvest skips it,
+title extraction skips it, and the TUI renders it as a one-line notice on
+resume. `tasks.notify: false` / `FREECODE_TASK_NOTIFY=0` makes
+`run_in_background` fall back to the foreground rather than spawning a
+sub-agent whose result could never arrive.
 
 ## Role definitions and their modes
 

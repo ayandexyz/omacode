@@ -91,7 +91,10 @@ function readEvents(dir: string): Array<Record<string, unknown>> {
     .map((l) => JSON.parse(l));
 }
 
-async function runLoop(sessionId: string, opts: { afterRunSteer?: string } = {}) {
+async function runLoop(
+  sessionId: string,
+  opts: { afterRunSteer?: string; beforeRun?: (loop: AgentLoop) => void } = {},
+) {
   lastUserSeen.length = 0;
   const rolloutDir = mkdtempSync(join(tmpdir(), "freecode-steer-rollout-"));
   const projectPath = mkdtempSync(join(tmpdir(), "freecode-steer-project-"));
@@ -123,6 +126,7 @@ async function runLoop(sessionId: string, opts: { afterRunSteer?: string } = {})
   const unsub = bus.subscribe("stream", (e) => {
     streamed.push((e as { event: { type: string } }).event);
   });
+  opts.beforeRun?.(loop);
   const result = await loop.run({
     prompt: "Do the thing",
     sessionId,
@@ -131,7 +135,7 @@ async function runLoop(sessionId: string, opts: { afterRunSteer?: string } = {})
     agentMode: "explore",
   });
   if (opts.afterRunSteer) loop.steer(opts.afterRunSteer);
-  const undelivered = loop.takeUndeliveredSteers();
+  const undelivered = loop.takeUndeliveredSteers().map((s) => s.text);
   unsub();
   await runtime.dispose();
   const events = readEvents(rolloutDir);
@@ -187,4 +191,28 @@ test("a steer that never reached the model is handed back for re-parking", async
   script = ["text"];
   const { undelivered } = await runLoop("steer-late", { afterRunSteer: "too late" });
   assert.deepEqual(undelivered, ["too late"]);
+});
+
+test("a task notification rides the steer path but persists as its own kind", async () => {
+  script = ["tool", "text", "text"];
+  onRequest = (loop, n) => {
+    if (n === 0) loop.steer("<task-notification>done</task-notification>", "n1", "task_notification");
+  };
+  const { stored, streamed } = await runLoop("notify-mid");
+  assert.equal(lastUserSeen[1], "<task-notification>done</task-notification>");
+  const note = stored.find((m) => m.id === "n1");
+  assert.equal(note?.synthetic, "task_notification");
+  assert.ok(
+    !streamed.some((e) => e.type === "message_steered" && e.id === "n1"),
+    "no queued row exists to promote",
+  );
+});
+
+test("a steer queued before run() starts is not dropped by the run's reset", async () => {
+  script = ["text", "text"];
+  const { undelivered } = await runLoop("steer-early", {
+    beforeRun: (loop) => loop.steer("early", "e1", "task_notification"),
+  });
+  assert.equal(lastUserSeen[0], "early", "delivered before the first model call");
+  assert.deepEqual(undelivered, []);
 });

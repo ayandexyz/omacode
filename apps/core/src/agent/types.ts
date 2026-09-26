@@ -312,6 +312,8 @@ export interface UserInput {
   projectPath: string;
   agentMode?: AgentMode;
   effort?: EffortLevel;
+  /** Set when the harness, not the user, wrote the prompt (a task notification). */
+  synthetic?: "task_notification";
 }
 
 export interface LoopResult {

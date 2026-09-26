@@ -42,6 +42,8 @@ export interface AgentRegisterOptions {
   /** Session that spawned it: the root session, or another agent's id. */
   parentId: string;
   task: string;
+  prompt: string;
+  background?: boolean;
   agentType: string;
   /** Cancels the subagent's loop; wired to `AgentLoop.interrupt`. */
   interrupt?: () => void;
@@ -56,6 +58,8 @@ interface AgentRecord {
   parentId: string;
   rootId: string;
   task: string;
+  prompt: string;
+  background: boolean;
   agentType: string;
   depth: number;
   status: AgentStatus;
@@ -90,6 +94,8 @@ export class AgentRegistry {
       parentId: options.parentId,
       rootId,
       task: options.task,
+      prompt: options.prompt,
+      background: options.background ?? false,
       agentType: options.agentType,
       depth,
       status: "running",
@@ -300,6 +306,8 @@ function summarize(record: AgentRecord): AgentSummary {
     parentId: record.parentId,
     rootId: record.rootId,
     task: record.task,
+    prompt: record.prompt,
+    background: record.background,
     agentType: record.agentType,
     depth: record.depth,
     status: record.status,
