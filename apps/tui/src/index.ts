@@ -181,6 +181,13 @@ let currentSession: SessionInfo | null = null;
 // Session id of the turn currently streaming, or null when idle. Drives whether
 // Ctrl+C cancels the turn (busy) or moves toward exit (idle).
 let activeTurnSessionId: string | null = null;
+// A turn core started on its own (`turn_started`): a drained follow-up or a
+// task notification. No session.send is waiting on it, so none of
+// submitPrompt's bookkeeping runs — this is the whole of its busy state.
+let coreTurn: { sessionId: string; rowId: number } | null = null;
+/** Only the current session's core turn counts; one left from a switch doesn't. */
+const coreTurnActive = (): boolean =>
+  coreTurn !== null && coreTurn.sessionId === currentSession?.sessionId;
 let currentProvider = "";
 let currentModel = "";
 // Undefined, not "low": an explicit level is sent on every turn, so a default
@@ -371,7 +378,9 @@ const contextBoxOverlay = tui.showOverlay(contextBox, {
   offsetY: 0,
   nonCapturing: true,
   // The widget is 46 columns wide; below 90 it would cover half the chat.
-  visible: (termWidth) => termWidth >= 90,
+  // Hidden while a subagent is on screen: it floats over the viewer's header
+  // and prompt, and the numbers are the MAIN session's, not the subagent's.
+  visible: (termWidth) => termWidth >= 90 && agentViewer === null,
 });
 
 // tui.addChild(new Text("\nType your messages below. Press Ctrl+C to exit."));
@@ -439,7 +448,7 @@ editor.statusLabel = () => {
 // Outside a repo it falls back to the turn number: `messageCount` counts
 // sent prompts and resets with the session, so the next one is always +1.
 editor.promptLabel = () => readGitBranch() ?? messageCount + 1;
-editor.isProcessing = () => activeTurnSessionId !== null;
+editor.isProcessing = () => activeTurnSessionId !== null || coreTurnActive();
 
 // `@` file mentions run on fd when it is installed and on a JS tree walk when
 // it is not, so completion works the same on a machine without fd (Windows,
@@ -2016,10 +2025,27 @@ function handleToolEvent(event: StreamEvent) {
     // RPC's own success:false response and whichever lands first wins; on the
     // escaped-error path that response never comes and this is the only thing
     // standing between the user and a spinner stuck on the idle deadline.
+    // Core started a turn nobody is awaiting: give it the same spinner row,
+    // interrupt and steering a typed prompt gets (see beginCoreTurn).
+    case "turn_started": {
+      if (event.sessionId && event.sessionId === currentSession?.sessionId) {
+        beginCoreTurn(event.sessionId, event.queuedId);
+        tui.requestRender();
+      }
+      break;
+    }
+    case "done": {
+      if (coreTurn && event.sessionId === coreTurn.sessionId) {
+        endCoreTurn();
+        tui.requestRender();
+      }
+      break;
+    }
     case "session.error": {
       const ownSessionId = activeTurnSessionId ?? currentSession?.sessionId;
       if (event.sessionId && ownSessionId && event.sessionId !== ownSessionId)
         break;
+      if (coreTurn && event.sessionId === coreTurn.sessionId) endCoreTurn();
       if (!failActiveStream(event.error)) {
         // No send pending (error arrived between turns) — render it directly.
         createSystemMessage(`**Error:** ${event.error}`);
@@ -2028,6 +2054,33 @@ function handleToolEvent(event: StreamEvent) {
       break;
     }
   }
+}
+
+/**
+ * A core-started turn begins: promote its queued row (a drained follow-up is
+ * that row's turn), reset the live token counters, and show
+ * the in-progress row. Ends on the turn's `done`, a `session.error`, or an
+ * interrupt.
+ */
+function beginCoreTurn(sessionId: string, queuedId?: string): void {
+  endCoreTurn();
+  if (queuedId) promoteQueuedToUser(queuedId);
+  // Not renderedTextThisRun: that flag is submitPrompt's, read after its RPC
+  // returns — and a notification turn can start inside that window (the
+  // previous turn's tail waits 500ms), which re-rendered its reply twice.
+  streamedChars = 0;
+  resetLiveOutputTokens();
+  resetLiveInputTokens();
+  resetLiveUsageTotals();
+  const row = createInProgressMessage(getRandomInProgressPhrase());
+  coreTurn = { sessionId, rowId: row.id };
+}
+
+function endCoreTurn(): void {
+  if (!coreTurn) return;
+  removeMessageById(coreTurn.rowId);
+  finalizeAssistantText();
+  coreTurn = null;
 }
 
 // Send a prompt to the agent through the streaming session. `displayText`, when
@@ -2498,10 +2551,12 @@ async function refreshCoreCommands(): Promise<void> {
 }
 
 const interruptController = new InterruptController({
-  isTurnActive: () => activeTurnSessionId !== null,
+  isTurnActive: () => activeTurnSessionId !== null || coreTurnActive(),
   cancelTurn: () => {
-    const id = activeTurnSessionId;
+    const id =
+      activeTurnSessionId ?? (coreTurnActive() ? coreTurn!.sessionId : null);
     activeTurnSessionId = null;
+    endCoreTurn();
     if (id) void sessionStop(id);
   },
   notify: (text) => showMessage(text),

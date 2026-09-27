@@ -159,6 +159,17 @@ export type StreamEvent =
   // A steer reached the model: it is now a persisted user message with this
   // id. The UI promotes the queued row to a normal user message.
   | { type: "message_steered"; sessionId?: string; id: string; content: string }
+  // Core started a turn that no session.send is waiting on: a queued
+  // follow-up drained after the previous turn, or a task notification on an
+  // idle session. Without it the frontend never knew a turn was running — no
+  // spinner, no interrupt, and a queued row that stayed badged "queued".
+  | {
+      type: "turn_started";
+      sessionId?: string;
+      origin: "queued" | "notification";
+      /** The queued message this turn is running, for `origin: "queued"`. */
+      queuedId?: string;
+    }
   // A memory was written about the user WITHOUT them asking (turn-end
   // extraction, spec 2026-08-09-memory-write-path D5). Arrives after the
   // turn's `done` because extraction is fire-and-forget, so frontends must

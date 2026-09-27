@@ -240,6 +240,7 @@ function flushTaskNotifications(sessionId: string): void {
       | AgentMode
       | undefined,
     synthetic: "task_notification",
+    origin: "notification",
   }).catch((err) => {
     const message = err instanceof Error ? err.message : String(err);
     logger.error("Task notification turn failed", { sessionId, message });
@@ -306,6 +307,9 @@ interface TurnInput {
   effort?: EffortLevel;
   agentMode?: "plan" | "build" | "review" | "explore" | "danger";
   synthetic?: "task_notification";
+  /** Set when core starts the turn itself — see the `turn_started` event. */
+  origin?: "queued" | "notification";
+  queuedId?: string;
 }
 
 /**
@@ -339,6 +343,13 @@ async function runSessionTurn(
     startingTurns.delete(sessionId);
   }
   activeLoops.set(sessionId, loop);
+  if (input.origin) {
+    BusEvents.stream(sessionId, {
+      type: "turn_started",
+      origin: input.origin,
+      ...(input.queuedId ? { queuedId: input.queuedId } : {}),
+    });
+  }
 
   // Per-turn store handle for title-pinning below. Cheap (effect runtime
   // memoizes the underlying service) but doing it once per turn is clearer
@@ -414,6 +425,8 @@ async function runSessionTurn(
       // land in the same logger.error path the handler would take.
       runSessionTurn(session, {
         prompt: next.content,
+        origin: "queued",
+        queuedId: next.id,
         provider: input.provider,
         model: input.model,
         effort: input.effort,

@@ -126,7 +126,7 @@ Delivery depends on what that agent is doing at the time:
 | Parent is… | What happens |
 | --- | --- |
 | **mid-turn** | The notification rides the steering path: it becomes the next user message at the next tool-batch boundary, inside the turn already running. No extra turn. |
-| **idle** | Core starts a turn with the notification as its prompt, so the agent reports back without you typing anything. |
+| **idle** | Core starts a turn with the notification as its prompt, so the agent reports back without you typing anything. It behaves like a turn you started: spinner, Ctrl+C/Esc stops it, Enter steers into it. |
 | **gone** (session ended, core restarted) | Dropped. There is nobody to tell. |
 
 Several finishing within 250 ms of each other become **one** turn, not one per
@@ -192,9 +192,6 @@ background shell a sub-agent started dies with that sub-agent.
   still pull-only: the model has to call `bashoutput` to learn that a shell
   finished. The notification path exists; wiring shells to it is tracked in
   `ROADMAP.md`.
-- **No spinner for a turn core started.** A notification turn streams its text
-  and tool cards, but the in-progress row doesn't show. Queued follow-up turns
-  have the same gap.
 - **Results do not survive a core restart.** The roster and pending
   notifications are in memory. A background sub-agent running when core dies
   is lost.
