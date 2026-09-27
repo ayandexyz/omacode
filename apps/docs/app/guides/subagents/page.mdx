@@ -231,6 +231,27 @@ for an agent that has already finished or was never theirs. If a message
 arrives too late for the sub-agent to read it, its result says so and repeats
 the message instead of dropping it.
 
+## Continuing a finished one
+
+A follow-up about a finished sub-agent's findings does not have to start from
+scratch. `agent({ continue: "<its id>", task, prompt })` runs a new sub-agent
+that starts with the finished one's whole conversation, then your new prompt:
+
+- It has **a new id**. Every sub-agent's result starts with an `Agent id:`
+  line, which is what `continue` takes; a continuation's adds
+  `(continued from <old id>)`. The continuation can itself be continued.
+- It runs as **the same type, mode and model** as the original. Passing
+  `subagent_type`, `model`, `readOnly` or `forkContext` with `continue` is an
+  error: changing any of them mid-history would be a different agent. Start a
+  new one instead.
+- `run_in_background` works as usual.
+- It is refused for an agent that is **still running** (use `agent_send`), one
+  **the parent stopped with `agent_stop`**, one it did not start, and the
+  verifier. An agent you stopped from `/agents` can be continued.
+- The original is looked up in the running core's roster, so continuing only
+  works until the session ends or core restarts, even though the old
+  sub-agent's session is still on disk.
+
 ## Watching them: `/agents`
 
 `/agents` is a roster of every sub-agent under the current session, oldest

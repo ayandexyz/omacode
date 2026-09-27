@@ -50,7 +50,9 @@ function ownAgent(id: string, ctx: ToolContext): AgentSummary | string {
     return `No agent ${id} started by this session.`;
   }
   if (agent.status !== "running") {
-    return `${id} has already ended (${agent.status}); its result is in its task notification.`;
+    // A model reaching for agent_send on a finished agent usually wants a
+    // follow-up; point it at the tool that does that, or it spawns afresh.
+    return `${id} has already ended (${agent.status}); its result is in its task notification. For a follow-up with its history, call agent with continue: "${id}".`;
   }
   return agent;
 }

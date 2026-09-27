@@ -15,6 +15,7 @@ import { createSessionStore, type SessionStore } from "../session/store.js";
 import { coerceBoolean } from "./coerce-args.js";
 import { createRecorder } from "../rollout/recorder.js";
 import { resolveSpawn } from "../agent/definitions/resolve.js";
+import { resolveContinuation } from "./agent-continue.js";
 import { getAgentRegistry } from "../agent/registry/index.js";
 import { disposeSubagentShells } from "./shells/index.js";
 import { notifyTask, taskNotificationsEnabled } from "../agent/task-notify.js";
@@ -31,6 +32,8 @@ interface AgentParams {
   agentType?: string;
   forkContext?: boolean;
   readOnly?: boolean;
+  /** Id of a finished sub-agent this caller started: run its next assignment. */
+  continue?: string;
   run_in_background?: boolean;
 }
 
@@ -75,6 +78,11 @@ const agentSchema: JsonSchema = {
       description:
         "Defaults to true: the sub-agent runs read-only and physically cannot see write/edit/bash, so it cannot change anything. If the task is to write or edit files you MUST set false, or the sub-agent cannot do it — it then inherits this session's permission mode.",
     },
+    continue: {
+      type: "string",
+      description:
+        "Optional: the id of a finished sub-agent you started. It picks up with its full history plus this prompt, as the same type on the same model — for a follow-up about its findings instead of starting over. Not with subagent_type, model, readOnly or forkContext.",
+    },
     run_in_background: {
       type: "boolean",
       description:
@@ -107,7 +115,7 @@ function validateAgentInput(
   ) {
     return { valid: false, error: "forkContext must be a boolean" };
   }
-  for (const key of ["subagent_type", "model", "agentType"]) {
+  for (const key of ["subagent_type", "model", "agentType", "continue"]) {
     if (p[key] !== undefined && typeof p[key] !== "string") {
       return { valid: false, error: `${key} must be a string` };
     }
@@ -151,20 +159,51 @@ async function executeSubagent(
   }
 
   // Definition and model next, still before anything exists on disk: an
-  // unknown name is a readable refusal, not a session left behind.
-  const spawn = resolveSpawn(params, ctx.projectPath ?? ctx.cwd);
+  // unknown name is a readable refusal, not a session left behind. A
+  // continuation takes all of it from the agent it continues.
+  const continued = params.continue
+    ? resolveContinuation(params as unknown as Record<string, unknown>, ctx.sessionId, agents)
+    : undefined;
+  if (continued && "error" in continued) return { success: false, error: continued.error };
+  const spawn = continued
+    ? {
+        agentLabel: continued.config.definition,
+        provider: continued.config.provider as string | undefined,
+        model: continued.config.model,
+        readOnly: continued.config.readOnly as boolean | undefined,
+        role: continued.config.role,
+      }
+    : (() => {
+        const r = resolveSpawn(params, ctx.projectPath ?? ctx.cwd);
+        if ("error" in r) return r;
+        return {
+          agentLabel: r.definition.name,
+          provider: r.provider,
+          model: r.model,
+          // An explicit readOnly wins; otherwise the definition's mode decides.
+          readOnly: coerceBoolean(params.readOnly) ?? r.definition.mode === "explore",
+          role: r.role,
+        };
+      })();
   if ("error" in spawn) return { success: false, error: spawn.error };
-  const agentLabel = spawn.definition.name;
+  const agentLabel = spawn.agentLabel;
 
   const baseDir = path.join(os.homedir(), ".freecode");
   sessionStore = await createSessionStore(baseDir);
-  const forking = coerceBoolean(params.forkContext) && !!ctx.sessionId;
-  if (forking) {
-    subagentId = await sessionStore.fork(ctx.sessionId!);
+  // A continuation forks the finished agent's session; forkContext forks the
+  // parent's. Either way the new id holds the history.
+  const forkFrom = continued
+    ? continued.sourceId
+    : coerceBoolean(params.forkContext) && ctx.sessionId
+      ? ctx.sessionId
+      : undefined;
+  const forking = !!forkFrom;
+  if (forkFrom) {
+    subagentId = await sessionStore.fork(forkFrom);
   }
 
-  // An explicit model (the call's, or the definition's) was validated by
-  // resolveSpawn. Otherwise inherit the parent's provider/model.
+  // An explicit model (the call's, the definition's, or the continued
+  // agent's) was validated already. Otherwise inherit the parent's.
   let provider = spawn.provider;
   let model = spawn.model;
   // The parent run's own model first: session meta usually has none (the
@@ -269,9 +308,16 @@ async function executeSubagent(
   // hardcoding `build` — under a `danger` parent that used to mean the
   // subagent prompted for permissions the user had already switched off, and
   // the prompt surfaced mid-turn with nothing saying which agent asked.
-  // An explicit readOnly wins; otherwise the definition's mode decides.
-  const readOnly =
-    coerceBoolean(params.readOnly) ?? spawn.definition.mode === "explore";
+  const readOnly = spawn.readOnly ?? true;
+  // Kept so `agent({ continue })` can run this agent's next generation the
+  // same way.
+  agents.setSpawnConfig(subagentId, {
+    definition: agentLabel,
+    readOnly,
+    provider,
+    model,
+    role: spawn.role,
+  });
   const subagentMode: AgentMode = readOnly
     ? "explore"
     : (ctx.agentMode ?? "build");
@@ -376,6 +422,9 @@ async function executeSubagent(
       }
       const output = [
         `Subagent: ${params.task}`,
+        // The id has to be in the text: metadata never reaches the model, and
+        // without it `continue` got the type name instead (delegation eval).
+        `Agent id: ${subagentId}${continued ? ` (continued from ${continued.sourceId})` : ""}`,
         `Status: ${success ? "SUCCESS" : "FAILED"}`,
         `Turns: ${result.turnCount}`,
         `Iterations: ${result.iterationCount}`,
@@ -395,6 +444,7 @@ async function executeSubagent(
           output,
           metadata: {
             subagentId,
+            ...(continued ? { continuedFrom: continued.sourceId } : {}),
             success,
             turns: result.turnCount,
           },
@@ -481,7 +531,11 @@ async function executeSubagent(
         "Its result will arrive as a <task-notification> message when it finishes. Do not poll or wait for it: carry on with other work, or end your turn if there is none.",
         `To change its instructions while it runs use agent_send(agent_id: "${subagentId}"); to cancel it, agent_stop.`,
       ].join("\n"),
-      metadata: { subagentId, background: true },
+      metadata: {
+        subagentId,
+        background: true,
+        ...(continued ? { continuedFrom: continued.sourceId } : {}),
+      },
     },
   };
 }
@@ -521,6 +575,7 @@ Use it when the work would burn context you have no further use for ("find every
 - It cannot spawn sub-agents of its own. If your task needs delegating twice, do the outer half yourself.
 - Its result is not shown to the user — relay what matters yourself.
 - To run several in parallel, make the calls in one response: read-only agents run at the same time and you get every result together. A writing agent (readOnly: false) always runs alone.
+- For a follow-up about a finished sub-agent's findings, pass \`continue: "<its id>"\` with the new prompt instead of starting over: it keeps its history.
 - run_in_background: true returns at once and delivers the result later as a <task-notification>. Use it for long work you don't need before your next step.`,
   schemas: {
     parameters: agentSchema,

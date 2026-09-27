@@ -1,6 +1,6 @@
 # Agent control, definitions, stall notices and continuation
 
-**Status:** Phases 1 and 2 built 2026-09-27 (`tools/agent-control.ts`; `agent/definitions/`). Phases 3–4 are plans.
+**Status:** Phases 1, 2 and 4 built 2026-09-27 (`tools/agent-control.ts`; `agent/definitions/`; `tools/agent-continue.ts`). Phase 3 dropped after its §3.2 check found no stalls (§3.0).
 **Branch:** `feat/background-subagents` (PR #38).
 **Source:** a read of `pi-herdsman` (a Pi extension for asynchronous subagents,
 `~/Projects/githubProjects/pi-herdsman`). Most of it coordinates separate Pi
@@ -231,6 +231,28 @@ prompt.
 
 ## 3. Phase 3 — stall notice for a background agent
 
+### 3.0 Outcome: dropped (2026-09-27)
+
+§3.2's check was run before building. It folded every `subagent.start` /
+`subagent.stop` pair in `~/.freecode/rollout/sessions` against each subagent's
+own event log, and measured the longest gap between consecutive events.
+
+| | |
+| --- | --- |
+| subagent runs | 248 (246 with their own log; 1 never recorded a stop) |
+| longest silence | 66 s, in a 78 s run |
+| silences > 60 s | 1 |
+| silences > 180 s | 0 |
+| silences > 600 s (`STALL_MS`) | 0 |
+
+Most of those runs are eval trials of short delegations, so the sample is
+biased toward quick tasks. Even so, nothing came within a factor of nine of the
+threshold. The fetch-layer timeouts and the 50-iteration cap already end what a
+stall notice would have reported. A notice that never fires is only code to
+maintain, so none was built. Rerun this fold if long-running background agents
+become common. The design below stays as the starting point if it ever finds
+one.
+
 ### 3.1 Design
 
 - **Tracking:** `AgentRecord.lastActivityAt` is updated in `append()`
@@ -269,6 +291,20 @@ never fires for a foreground agent or with the setting at 0.
 ---
 
 ## 4. Phase 4 — continue a finished agent
+
+### 4.0 As built
+
+As designed below, with one difference. The original's settings are kept in the
+in-process registry (`AgentSpawnConfig`, set at spawn), not on the session meta
+§4.2 names. So a continuation works until the session ends or core restarts,
+even though the old session is still on disk. That matches how long the id is
+useful to the model anyway. Open question 4 (hiding subagent sessions from
+`session.list`) is still open.
+
+The first eval found a bug the design had missed: the model never saw an agent's
+id. It lived only in the result's `metadata`, which does not reach the model.
+Opus then passed `continue: "explorer"` (the type) in 2 of 3 trials. Every
+result now leads with an `Agent id:` line, and a miss explains where the id is.
 
 ### 4.1 Today
 
@@ -315,4 +351,4 @@ shells, not its session. The history is on disk under the subagent id.
 4. **Phase 4.** Should subagent sessions be hidden from `session.list`?
    Continuation makes them worth keeping on disk, but they clutter the resume
    picker today. Check the picker before building.
-5. **Phase 3.** Drop it outright if §3.2's log fold finds no stalls?
+5. ~~**Phase 3.** Drop it outright if §3.2's log fold finds no stalls?~~ **Dropped**: 0 of 248 runs had a gap over 180 s (§3.0).

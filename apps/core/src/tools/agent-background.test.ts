@@ -89,7 +89,7 @@ test("a background agent returns at once and reports back through the sink", asy
     assert.equal(delivered.length, 1);
     assert.equal(delivered[0]!.sessionId, "root-bg");
     assert.match(delivered[0]!.text, /<status>completed<\/status>/);
-    assert.match(delivered[0]!.text, /Subagent: Find callers\nStatus: SUCCESS/);
+    assert.match(delivered[0]!.text, /Subagent: Find callers\nAgent id: \S+\nStatus: SUCCESS/);
     assert.match(delivered[0]!.notice, /Background agent completed: Find callers/);
   } finally {
     setTaskNotificationSink(prev);

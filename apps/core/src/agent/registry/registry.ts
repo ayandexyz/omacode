@@ -15,6 +15,7 @@
 import { bus } from "../../bus/index.js";
 import type { AgentReadResult, AgentStatus, AgentSummary } from "./types.js";
 import { formatActivity } from "./activity.js";
+import type { AgentRole } from "../definitions/types.js";
 
 /** Per-agent ring-buffer cap. Smaller than a shell's: this is a summary. */
 export const AGENT_BUFFER_CHARS = 64_000;
@@ -36,6 +37,18 @@ export const MAX_AGENT_DEPTH = 1;
 
 /** Ceiling on subagents running concurrently under one root session. */
 export const MAX_AGENTS_PER_ROOT = 8;
+
+/**
+ * How an agent was spawned, so `agent({ continue })` can run the next
+ * generation the same way: a continuation never changes role or authority.
+ */
+export interface AgentSpawnConfig {
+  definition: string;
+  readOnly: boolean;
+  provider: string;
+  model?: string;
+  role?: AgentRole;
+}
 
 export interface AgentRegisterOptions {
   id: string;
@@ -77,6 +90,7 @@ interface AgentRecord {
   pendingMessages: string[];
   /** Its parent stopped it with `agent_stop`: no completion notice is owed. */
   stoppedByParent?: boolean;
+  spawnConfig?: AgentSpawnConfig;
   onActivity?: (id: string, chunk: string) => void;
   onExit?: (id: string, status: AgentStatus) => void;
 }
@@ -183,6 +197,16 @@ export class AgentRegistry {
   /** Messages that never reached the loop: it settled before attaching. */
   takeUndelivered(id: string): string[] {
     return this.agents.get(id)?.pendingMessages.splice(0) ?? [];
+  }
+
+  /** Recorded once the spawn is fully resolved; read by `agent({ continue })`. */
+  setSpawnConfig(id: string, config: AgentSpawnConfig): void {
+    const record = this.agents.get(id);
+    if (record) record.spawnConfig = config;
+  }
+
+  spawnConfigOf(id: string): AgentSpawnConfig | undefined {
+    return this.agents.get(id)?.spawnConfig;
   }
 
   /** The parent stopped it itself, so the parent needs no completion notice. */

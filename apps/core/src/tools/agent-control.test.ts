@@ -145,7 +145,7 @@ test("only the parent may send or stop, and only while it runs", async () => {
     release();
     await until(() => getAgentRegistry().get(id)?.status === "completed");
     const late = await tools.agent_send.execute({ agent_id: id, message: "x" }, ctx("root-own", project));
-    assert.match(late.success ? late.result.output : "", /already ended \(completed\)/);
+    assert.match(late.success ? late.result.output : "", /already ended \(completed\).*call agent with continue: "/);
     const missing = await tools.agent_stop.execute({ agent_id: "subagent-nope" }, ctx("root-own", project));
     assert.match(missing.success ? missing.result.output : "", /No agent subagent-nope/);
   } finally {
