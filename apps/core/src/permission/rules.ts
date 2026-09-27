@@ -61,7 +61,10 @@ export function extractTarget(toolName: string, args: Record<string, unknown>): 
     return (args.filePath ?? args.path ?? args.cwd) as string | undefined;
   }
   if (URL_TOOLS.has(tool)) return (args.url ?? args.query) as string | undefined;
-  if (tool === "agent") return (args.agentType as string | undefined) ?? "";
+  // `Agent(reviewer)` names a sub-agent type; `agentType` is the old alias.
+  if (tool === "agent") {
+    return ((args.subagent_type ?? args.agentType) as string | undefined) ?? "";
+  }
   return undefined;
 }
 

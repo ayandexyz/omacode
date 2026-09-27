@@ -310,6 +310,7 @@ export type ContextSegmentId =
   | "system-prompt"
   | "project-instructions"
   | "skills"
+  | "agent-types"
   | "memory-guidance"
   | "tools"
   | "mcp-tools"

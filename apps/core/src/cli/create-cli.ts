@@ -23,6 +23,7 @@ import { serveCommand } from "./commands/serve.js";
 import { runCommand } from "./commands/run.js";
 import { traceCommand } from "./commands/trace.js";
 import { checkpointCommand } from "./commands/checkpoint.js";
+import { agentsCommand } from "./commands/agents.js";
 import { evalCommand } from "./commands/eval.js";
 import { uninstallCommand } from "./commands/uninstall.js";
 import { authCommand } from "./commands/auth.js";
@@ -97,6 +98,7 @@ export function createCli(extraCommands: CommandModule[] = []) {
     .command(runCommand)
     .command(traceCommand as CommandModule)
     .command(checkpointCommand as CommandModule)
+    .command(agentsCommand as CommandModule)
     .command(evalCommand as CommandModule)
     .command(authCommand)
     .command(uninstallCommand)

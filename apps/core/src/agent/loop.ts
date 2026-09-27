@@ -753,6 +753,7 @@ export class AgentLoop {
       projectPath: input.projectPath,
       agentMode: input.agentMode ?? "build",
       effort: input.effort,
+      role: input.role,
       // Loop health is per-run: carrying a previous run's counters across
       // prompts would let its history stop the *next* run at the health check
       // before it ever reached the provider.
@@ -1736,6 +1737,14 @@ export class AgentLoop {
         provider,
         model,
       );
+      // A subagent's role (its definition file) is fixed for the run, so it
+      // can sit in the cached prefix.
+      if (this.state.role?.prompt && systemBlocks[0]) {
+        systemBlocks[0] = {
+          ...systemBlocks[0],
+          text: `${systemBlocks[0].text}\n\n# Your role: ${this.state.role.name}\n${this.state.role.prompt}`,
+        };
+      }
 
       // These are recompiled from disk every turn, so a mid-session CLAUDE.md
       // edit rewrites the cached prefix. Document it here or D2 reports the
@@ -2309,7 +2318,11 @@ export class AgentLoop {
     streamed?: boolean;
   }> {
     const aiProvider = getProvider(provider as any);
-    const tools = getToolDefs(this.state.agentMode);
+    // A definition's allowlist narrows what the mode allows, never widens it.
+    const allowed = this.state.role?.tools;
+    const tools = allowed
+      ? getToolDefs(this.state.agentMode).filter((t) => allowed.includes(t.name))
+      : getToolDefs(this.state.agentMode);
 
     // Cap tool results in old history turns to prevent token explosion on long
     // sessions. The model already processed those results fully when they were
@@ -2904,6 +2917,17 @@ export class AgentLoop {
       // to know which in-flight tool is the blocking one.
       toolUseId: toolCall.id,
     };
+
+    // A tool outside the role's allowlist was never offered; a call to one
+    // is a hallucination or an old transcript, and must not run.
+    const roleTools = this.state.role?.tools;
+    if (roleTools && !roleTools.includes(toolCall.tool)) {
+      return this.denyToolCall(
+        toolCall,
+        "role",
+        `Tool ${toolCall.tool} is not available to the ${this.state.role!.name} agent. Its tools: ${roleTools.join(", ")}.`,
+      );
+    }
 
     // PreToolUse Hook — can block or modify tool call
     const preResult = await this.hooks.runPreToolUse(toolCall, hookContext);

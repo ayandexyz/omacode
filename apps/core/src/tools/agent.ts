@@ -14,7 +14,7 @@ import type { HookRuntime } from "../hooks/runtime.js";
 import { createSessionStore, type SessionStore } from "../session/store.js";
 import { coerceBoolean } from "./coerce-args.js";
 import { createRecorder } from "../rollout/recorder.js";
-import { listProviders } from "../providers/registry.js";
+import { resolveSpawn } from "../agent/definitions/resolve.js";
 import { getAgentRegistry } from "../agent/registry/index.js";
 import { disposeSubagentShells } from "./shells/index.js";
 import { notifyTask, taskNotificationsEnabled } from "../agent/task-notify.js";
@@ -23,6 +23,11 @@ import { recordEnd, recordStart } from "../agent/background-ledger.js";
 interface AgentParams {
   task: string;
   prompt: string;
+  /** A definition name (agent/definitions); default `general`. */
+  subagent_type?: string;
+  /** `provider` or `provider/model`; default the parent's. */
+  model?: string;
+  /** Deprecated alias for `model` (or a definition name); not in the schema. */
   agentType?: string;
   forkContext?: boolean;
   readOnly?: boolean;
@@ -50,9 +55,15 @@ const agentSchema: JsonSchema = {
       type: "string",
       description: "The actual prompt/instruction for the sub-agent",
     },
-    agentType: {
+    subagent_type: {
       type: "string",
-      description: "Optional: AI provider to use (e.g., 'chatgpt', 'claude')",
+      description:
+        "Optional: which kind of sub-agent to run — one of the names under 'Sub-agent types' in your instructions. Default general.",
+    },
+    model: {
+      type: "string",
+      description:
+        "Optional: run it on another model, as provider or provider/model (e.g. anthropic/claude-opus-5). Default: this session's model.",
     },
     forkContext: {
       type: "boolean",
@@ -96,6 +107,11 @@ function validateAgentInput(
   ) {
     return { valid: false, error: "forkContext must be a boolean" };
   }
+  for (const key of ["subagent_type", "model", "agentType"]) {
+    if (p[key] !== undefined && typeof p[key] !== "string") {
+      return { valid: false, error: `${key} must be a string` };
+    }
+  }
   if (p.readOnly !== undefined && coerceBoolean(p.readOnly) === undefined) {
     return { valid: false, error: "readOnly must be a boolean" };
   }
@@ -134,6 +150,12 @@ async function executeSubagent(
     return { success: false, error: String((error as Error).message ?? error) };
   }
 
+  // Definition and model next, still before anything exists on disk: an
+  // unknown name is a readable refusal, not a session left behind.
+  const spawn = resolveSpawn(params, ctx.projectPath ?? ctx.cwd);
+  if ("error" in spawn) return { success: false, error: spawn.error };
+  const agentLabel = spawn.definition.name;
+
   const baseDir = path.join(os.homedir(), ".freecode");
   sessionStore = await createSessionStore(baseDir);
   const forking = coerceBoolean(params.forkContext) && !!ctx.sessionId;
@@ -141,17 +163,10 @@ async function executeSubagent(
     subagentId = await sessionStore.fork(ctx.sessionId!);
   }
 
-  // `agentType` is documented as an optional provider override, not a real
-  // "agent type" — but the registry only knows anthropic/openai/gemini/
-  // minimax/deepseek/zai, so an unset or bogus value used to default to the
-  // unregistered "chatgpt" and throw on the subagent's first turn (known gap
-  // #6). Fall back to the parent session's own provider/model instead.
-  const registeredIds = new Set(listProviders().map((p) => p.id));
-  let provider =
-    params.agentType && registeredIds.has(params.agentType)
-      ? params.agentType
-      : undefined;
-  let model: string | undefined;
+  // An explicit model (the call's, or the definition's) was validated by
+  // resolveSpawn. Otherwise inherit the parent's provider/model.
+  let provider = spawn.provider;
+  let model = spawn.model;
   // The parent run's own model first: session meta usually has none (the
   // model is chosen per turn), and the provider's default then silently
   // stood in — a MiniMax-M3 session delegated to MiniMax-M2.
@@ -175,7 +190,7 @@ async function executeSubagent(
     if (forking) await discardSession();
     return {
       success: false,
-      error: `agent: no valid provider (agentType "${params.agentType ?? ""}" is not registered, and the parent session has none)`,
+      error: "agent: no provider — none was given, and the parent session has none",
     };
   }
 
@@ -221,7 +236,7 @@ async function executeSubagent(
       task: params.task,
       prompt: params.prompt,
       background,
-      agentType: params.agentType || "agent",
+      agentType: agentLabel,
       // Stamped with the ROOT session id: the frontend subscribes to the root
       // and would never see an event addressed to the subagent's own id.
       onActivity: (id, chunk) =>
@@ -254,7 +269,9 @@ async function executeSubagent(
   // hardcoding `build` — under a `danger` parent that used to mean the
   // subagent prompted for permissions the user had already switched off, and
   // the prompt surfaced mid-turn with nothing saying which agent asked.
-  const readOnly = coerceBoolean(params.readOnly) ?? true;
+  // An explicit readOnly wins; otherwise the definition's mode decides.
+  const readOnly =
+    coerceBoolean(params.readOnly) ?? spawn.definition.mode === "explore";
   const subagentMode: AgentMode = readOnly
     ? "explore"
     : (ctx.agentMode ?? "build");
@@ -266,7 +283,7 @@ async function executeSubagent(
     agentId: subagentId,
     parentId: parentSessionId,
     task: params.task,
-    agentType: params.agentType || "agent",
+    agentType: agentLabel,
     depth: agents.depthOf(subagentId),
   });
 
@@ -282,7 +299,7 @@ async function executeSubagent(
 
       BusEvents.subagentStarted(
         subagentId,
-        params.agentType || "agent",
+        agentLabel,
         parentSessionId,
         params.task,
       );
@@ -318,6 +335,7 @@ async function executeSubagent(
         model,
         projectPath,
         agentMode: subagentMode,
+        role: spawn.role,
       });
 
       // The loop reports its own interrupt as a clean completion (that is the
@@ -338,7 +356,7 @@ async function executeSubagent(
 
       BusEvents.subagentCompleted(
         subagentId,
-        params.agentType || "agent",
+        agentLabel,
         parentSessionId,
         success,
         message,
@@ -389,7 +407,7 @@ async function executeSubagent(
 
       BusEvents.subagentCompleted(
         subagentId,
-        params.agentType || "agent",
+        agentLabel,
         parentSessionId,
         false,
         errorMsg,
@@ -497,6 +515,7 @@ export const AgentTool: Tool<AgentParams> = buildTool({
 
 Use it when the work would burn context you have no further use for ("find everywhere X is wired up", "why is this test flaky"). Don't use it for work you can do directly — a known read, a single grep, an understood edit is faster inline.
 
+- Pick a \`subagent_type\` from 'Sub-agent types' in your instructions when one fits the task; without one it is \`general\`.
 - Put everything it needs in \`prompt\`: it starts cold unless forkContext: true (forks this session into it). Say exactly what you want back.
 - It is READ-ONLY by default and cannot write, edit, or run bash. When the task is to change code you must pass readOnly: false, or it will fail; it then runs with this session's permissions.
 - It cannot spawn sub-agents of its own. If your task needs delegating twice, do the outer half yourself.

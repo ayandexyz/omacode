@@ -96,6 +96,72 @@ request and returns `PASS`, `FAIL` or `PARTIAL`. A `FAIL` sends the main agent
 back to fix the problem, at most twice per run. The verifier appears in
 `/agents` as `Verify changes`. The model does not choose this one.
 
+### Sub-agent types (`subagent_type`)
+
+A **type** is a named role: its own instructions, optionally a narrower tool
+set, a model, and whether it may edit. The model picks one with
+`subagent_type`; without one it gets `general`, which is what every sub-agent
+was before types existed. Every session's system prompt lists the available
+types, one line each.
+
+Three are built in:
+
+| Type | What it is |
+| --- | --- |
+| `general` | Any self-contained task. Read-only unless the call passes `readOnly: false`. |
+| `explorer` | Read-only reconnaissance: entry points, flows, constraints. Only `read`, `ls`, `glob`, `grep`, `lsp`. |
+| `reviewer` | Read-only review for bugs, security issues and needless complexity. Same tools as `explorer`. |
+
+Add your own as markdown files. The format is Claude Code's, so a
+`.claude/agents/*.md` you already have works as is:
+
+```markdown
+---
+name: security-auditor
+description: Read-only audit for injection, path traversal and unsafe input handling.
+tools: Read, Grep, Glob        # optional; omitted = everything its mode allows
+model: inherit                 # optional: inherit, or provider/model
+mode: explore                  # optional, FreeCode only: explore (read-only) or build
+---
+You are security-auditor. Report each risk with its path and line and a
+concrete input that triggers it. Do not edit anything.
+```
+
+Where they are read from, later winning on a name clash:
+
+1. built-in
+2. `~/.claude/agents/`
+3. `~/.freecode/agents/`
+4. `<project>/.claude/agents/`
+5. `<project>/.freecode/agents/`
+
+`FREECODE_CLAUDE_CODE_AGENTS=0` skips both `.claude` directories. Run
+`freecode agents list` to see what a project resolves to, which file each
+type came from, and what a later scope shadowed.
+
+How a file is applied:
+
+- **`tools` narrows, never widens.** It is intersected with what the
+  sub-agent's mode allows, so a read-only type listing `Bash` still cannot run
+  it. A call to a tool outside the list is refused. Claude Code's capitalised
+  names (`Read`, `Grep`) are understood; names FreeCode has no tool for are
+  dropped, and a file with none left is skipped.
+- **`mode`:** without it, a file whose `tools` include `Write`, `Edit` or `Bash`
+  is `build` and anything else is `explore`. `build` behaves like
+  `readOnly: false`, including inheriting the parent's permission mode. An
+  explicit `readOnly` on the call beats the file.
+- **`model`:** Claude Code's aliases (`sonnet`, `opus`, `haiku`) mean inherit.
+  An unknown provider is an error, not a silent fallback.
+- **The body** is added to the sub-agent's system prompt under
+  `# Your role: <name>`. Project instructions (`CLAUDE.md`, `AGENTS.md`) still
+  apply.
+- **Bad files are skipped** with one warning: missing `name`/`description`, an
+  invalid name, or an unknown `mode`.
+- **An unknown `subagent_type` is an error** that lists the valid names.
+
+Project type files load without a trust step, as in Claude Code: they can only
+shape a prompt and narrow tools, never run code or widen permissions.
+
 ## Who decides
 
 **The model decides, from the tool description.** Nothing in the harness picks
@@ -106,6 +172,7 @@ foreground or background, read-only or writing, for it. What the model is told:
   inline.
 - Put everything into `prompt`, because the sub-agent starts cold unless
   forked.
+- Pick a `subagent_type` from the listed types when one fits.
 - It is read-only by default. When the task is to change code it **must** pass
   `readOnly: false`, or the sub-agent can't do it.
 - It cannot spawn sub-agents of its own.
@@ -196,7 +263,7 @@ buffer (64K characters per agent), then follows live.
 | Nesting depth | 1: a sub-agent cannot spawn sub-agents | tool error telling the model to do the work itself |
 | Running per session | 8 | tool error: wait for one to finish |
 | Iterations | 50 for the `agent` tool, 15 for the verifier | the sub-agent stops and reports |
-| Provider | the parent session's provider and model | `agentType` is a provider override, used only if that provider is registered |
+| Provider | the parent session's provider and model | `model` (`provider` or `provider/model`), or the type's `model:`; an unknown provider is an error. The old `agentType` is still accepted: a type name or a registered provider, and anything else is ignored as before |
 
 A stopped (`k`) sub-agent reports `killed` to its parent, whether foreground or
 background. When a session ends, its sub-agents are stopped and forgotten. A

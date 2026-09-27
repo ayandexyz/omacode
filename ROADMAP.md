@@ -13,13 +13,6 @@ skills (incl. `~/.claude/plugins` scope), permission rules via `.freecode/settin
 and `CLAUDE.md`/`AGENTS.md` instructions. Ranked by value per line of work.
 
 
-- [ ] **3. User-defined subagents** — `SubagentType` (`apps/core/src/agent/types.ts:38-43`)
-      is a closed union of five, with descriptions in `SUBAGENT_DEFINITIONS`. No
-      `.freecode/agents/*.md` loader. Bind loaded agents to the existing capability
-      profiles in `permission/profiles.ts`. Reuse the frontmatter-markdown loader
-      already in `commands/loader.ts` (which shipped item 2, user-defined slash
-      commands).
-
 - [ ] **4. Rules hierarchy** — `context/instructions.ts` reads `CLAUDE.md`/`AGENTS.md` from
       exactly two dirs (global `~/.freecode/`, project root), first match wins.
       Missing: walk-up for monorepos, `@imports` (both deferred in the comment at line 6),
@@ -34,7 +27,9 @@ and `CLAUDE.md`/`AGENTS.md` instructions. Ranked by value per line of work.
       side is done. Already listed as deferred in `CLAUDE.md`.
 
 **Suggested order:** 3, then 4. Item 5 is a larger, self-contained project.
-(Item 2, user-defined slash commands, shipped as `commands/loader.ts`. Item 6,
+(Item 2, user-defined slash commands, shipped as `commands/loader.ts`. Item 3,
+user-defined subagents, shipped 2026-09-27 as `agent/definitions/` + the `agent`
+tool's `subagent_type` — spec `2026-09-27-agent-control-and-definitions.md` §2. Item 6,
 background bash, shipped as `tools/shells/` + `bashoutput`/`killbash` and the
 TUI's `/shells` panel. Item 8, checkpoints/rewind, shipped 2026-09-23 as
 `checkpoint/` + `/rewind` — spec `2026-09-23-checkpoints-rewind.md`; its §9
@@ -42,10 +37,10 @@ open questions, chiefly non-git projects, are the remaining work.)
 
 ## Subagent permission profiles (added 2026-09-08)
 
-Blocked on user-defined subagents (Extensibility item 3). The dead-code half of this (`PROFILES`, `PermissionChecker`, duplicate `PermissionProfile` interface) is also tracked under Tool system in `TODO.md`.
+User-defined subagents (Extensibility item 3) shipped without these: a definition restricts a subagent with its mode (explore/build) plus a tool allowlist, not a capability profile. The dead-code half of this (`PROFILES`, `PermissionChecker`, duplicate `PermissionProfile` interface) is also tracked under Tool system in `TODO.md`.
 
 
-**Status:** partly mitigated, the real fix is item 3 above.
+**Status:** partly mitigated. Item 3 shipped a per-definition tool allowlist (spec `2026-09-27-agent-control-and-definitions.md` §2.4), which narrows a writing subagent's tools; path and network scoping are still missing.
 
 `createToolOrchestrator()` is called with `{}` at all three production sites
 (`effect/layers.ts:63`, `:179`, `agent/loop.ts:429`). `OrchestratorOptions.permissionProfile`
@@ -64,7 +59,8 @@ explorer/reviewer/summarizer/verifier are genuinely confined.
 
 The real gap is that **mode is binary**. There is nothing between explore and
 build, so a subagent that is allowed to write at all runs with the exact
-authority of its parent: no path scoping, no network restriction, no allowlist.
+authority of its parent: no path scoping and no network restriction. A definition's
+`tools:` allowlist can now narrow which tools it has, but not where they reach.
 Two guard rails now stand in for the missing sandbox — `MAX_AGENT_DEPTH`
 (`agent/registry/`) bounds the spawn tree, and `agent(readOnly)` defaults true
 so the common case (analysis, search, review) is confined to `explore` and

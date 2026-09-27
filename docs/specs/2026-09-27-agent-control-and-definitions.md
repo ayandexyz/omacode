@@ -1,6 +1,6 @@
 # Agent control, definitions, stall notices and continuation
 
-**Status:** Phase 1 built 2026-09-27 (`tools/agent-control.ts`); Phases 2–4 are plans.
+**Status:** Phases 1 and 2 built 2026-09-27 (`tools/agent-control.ts`; `agent/definitions/`). Phases 3–4 are plans.
 **Branch:** `feat/background-subagents` (PR #38).
 **Source:** a read of `pi-herdsman` (a Pi extension for asynchronous subagents,
 `~/Projects/githubProjects/pi-herdsman`). Most of it coordinates separate Pi
@@ -107,6 +107,31 @@ agent_stop({ agent_id })            // interrupt it
 ---
 
 ## 2. Phase 2 — agent definitions from files
+
+### 2.0 As built — where it differs from the plan below
+
+- **Built-ins are code, not bundled `.md` files** (`agent/definitions/builtin.ts`),
+  so the bun release binary needs no extra asset. There are three, not five:
+  `general` (today's behaviour), `explorer` and `reviewer`. `SUBAGENT_DEFINITIONS`
+  still drives only the loop's verifier (`agent/subagent.ts`) and is untouched.
+- **The roster is in the system prompt, not the tool description** (§2.4 said
+  tool description). Tool definitions are process-wide (`tools/defs-cache.ts`)
+  while definitions are per project, and a daemon can serve several projects.
+  It is a `PromptCompiler` segment (`agent-types`, shown in `/context`),
+  byte-stable until a file changes, like `CLAUDE.md`.
+- **`mode` is inferred when absent:** `build` if `tools` lists `write`, `edit`
+  or `bash`, else `explore`. Claude Code files have no `mode`, and
+  `tools: Edit, Write` would otherwise be dead in explore.
+- **The `agentType` alias is read both ways:** a definition name if one
+  matches, else a registered provider, else ignored as before. Models do pass
+  role names in it.
+- **A role's tool allowlist is enforced twice:** the tool list the model is
+  offered is filtered, and a call to anything else is refused with
+  `function.denied` source `role` (`DenySource`).
+- **Not built:** the `/agents` row showing the definition name (§2.6). The
+  registry records it as `agentType`, but the TUI does not render that field.
+  Also not built: `eval ab` (§2.7). Nothing can switch the roster off, so the
+  check was `trajectory --gate` against the pre-change baseline.
 
 ### 2.1 Today
 
