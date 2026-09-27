@@ -26,14 +26,7 @@ and `CLAUDE.md`/`AGENTS.md` instructions. Ranked by value per line of work.
 - [ ] **7. MCP server (expose)** — serve FreeCode's tools *as* an MCP server. The client
       side is done. Already listed as deferred in `CLAUDE.md`.
 
-**Suggested order:** 3, then 4. Item 5 is a larger, self-contained project.
-(Item 2, user-defined slash commands, shipped as `commands/loader.ts`. Item 3,
-user-defined subagents, shipped 2026-09-27 as `agent/definitions/` + the `agent`
-tool's `subagent_type` — spec `2026-09-27-agent-control-and-definitions.md` §2. Item 6,
-background bash, shipped as `tools/shells/` + `bashoutput`/`killbash` and the
-TUI's `/shells` panel. Item 8, checkpoints/rewind, shipped 2026-09-23 as
-`checkpoint/` + `/rewind` — spec `2026-09-23-checkpoints-rewind.md`; its §9
-open questions, chiefly non-git projects, are the remaining work.)
+**Suggested order:** 4 first. Item 5 is a larger, self-contained project.
 
 ## Subagent permission profiles (added 2026-09-08)
 
@@ -113,114 +106,6 @@ D12–D14). These are actionable independently of that spec's phases.
   go back for them. codex's answer is a bounded, leased, parallel Phase 1 at
   startup.
 
-## Memory: long-horizon evaluation (after spec 2026-09-25 §7.1)
-
-The existing `memory-sessions` suite measures capture and recall over 2–3
-sessions. Its completed work and results live in
-[`2026-09-25-memory-efficiency-and-graph-explorer.md`](docs/specs/2026-09-25-memory-efficiency-and-graph-explorer.md)
-§7. The following are measurement projects, not missing production features.
-Build and validate the harnesses first; run paid experiments afterward.
-
-1. [x] **Consolidation comparison harness.** Built 2026-09-26 as
-   `evals/memory-consolidation.jsonl` plus `consolidateBeforeFinal` in the
-   eval runner. Seed identical isolated stores
-   with duplicates, complementary facts, corrections, and unrelated controls.
-   Run the production consolidator on one copy, then freeze both stores and
-   score the same held-out tasks at the same injection byte budget. Use
-   fixture-only eligible session history and project-local scheduling settings;
-   preserve production defaults. Record whether consolidation actually ran,
-   its outcome, merge counts, retained facts, and its model cost. A skipped or
-   failed pass must not count as a successful consolidation experiment.
-2. [x] **Consolidation experiment.** Two fixtures, two verdicts (full detail
-   in spec §7.2 and `EVAL.md`). `consolidate-production-endpoint` (pure
-   near-duplicate merge): a 5-trial replicate reversed the earlier 3-trial
-   "−4.7% cost" reading — candidate cost went +10% and pass rate was NOT
-   preserved (one candidate-only failure right after a merge+delete) —
-   **rejected**. `consolidate-stale-then-corrected` (stale vs. corrected
-   memory, plus a distractor/control that must not be touched): two
-   independent 3-trial runs both went 3/3 on both arms and consolidation was
-   consistently cheaper — **kept**. `storeSize` and `costByOperation` are now
-   in the ledger; rendered recall and irrelevant bytes at trial level remain
-   unaddressed (would need a per-turn recording channel). Net: consolidation
-   earns its cost when there is a real conflict to supersede, not proven (and
-   showed one regression) when there is only a near-duplicate to fold.
-3. [x] **Long-horizon harness.** Built 2026-09-26: `TrialResult.memorySnapshots`
-   / `teachingCostUsd` (`eval/types.ts`, `eval/runner.ts`), the `sessions[]` +
-   `sessionFollowUps[][]` fixture shape (`eval/dataset.ts`), and
-   `evals/memory-long-horizon.jsonl` (5 cases, up to 12 sessions each,
-   dilution/correction/gap/assembly/control). Evidence: `dataset.test.ts`
-   ("the shipped long-horizon suite is valid"), `runner.test.ts` (6/6).
-4. [x] **Savings-curve experiment.** Run 2026-09-26 (MiniMax-M3, 3 trials,
-   two paired comparisons; `evals/experiments.jsonl`
-   `2026-09-26-memory-long-horizon-{1,2}`, both **kept**; full numbers in
-   spec §7.3, suite doc in `EVAL.md`). Memory off passed 3/15, learning +
-   scheduled consolidation 10/15 (cost per passed probe −66%); consolidation
-   off (still learning) 8/15, on-schedule 11/15 (a further −41%). No
-   break-even in teaching cost itself at any of the 1/3/6/9/12 checkpoints —
-   learning costs more to teach, session over session, and the entire return
-   is the final probe passing. The memory tool stayed callable with
-   auto-recall/extraction off (2 voluntary writes, no effect since recall was
-   off). One case (`long-incremental-assembly`) never passed in any arm
-   (0/12). Its fixture confound is fixed (`595b9dd3`); the re-run is still
-   0/3 vs 0/3 and now fails on memory — last-taught fact not retained,
-   consolidation dropping an earlier one — filed in `TODO.md`.
-5. [x] **External-corpus adapter.** Built and validated 2026-09-26,
-   `apps/core/src/eval/longmemeval-adapter.ts` + `.test.ts` (12/12, no model
-   calls). Licence check: `xiaowu0162/longmemeval` (containing the
-   `longmemeval_s` split this item names) is deprecated by its own
-   maintainer for noisy sessions; the adapter targets the replacement,
-   `xiaowu0162/longmemeval-cleaned`'s `longmemeval_s_cleaned` split — both
-   MIT. Pinned: revision `98d7416c`, file `longmemeval_s_cleaned.json`,
-   sha256 `d6f21ea9…c3a442`, 277 MB (`LONGMEMEVAL_SOURCE` in the adapter —
-   re-check `revisionSha` before #6, a dataset can move without a version
-   bump). Ingestion goes straight through `extractMemories` per haystack
-   session in chronological order — no live agent turn per session, since the
-   haystack is fixed historical dialogue and replaying it through our own
-   agent would substitute invented replies for the recorded ones. Answer
-   leakage is guarded on the scored question only (never the haystack, where
-   the taught fact is supposed to appear — an early version of this guard
-   wrongly fired there and had to be fixed). Ingestion cost and scored-turn
-   cost are tracked separately, matching the item's ask.
-
-   **One paid smoke run (2026-09-26, MiniMax-M3), a real finding, not just a
-   mechanics check:** a synthetic 4-session haystack (one session: "I just
-   adopted a beagle puppy... I named him Biscuit") ingested cleanly
-   ($0.00046, 4/4 sessions) but saved **zero** memories, and the live scored
-   turn — asked "what is the name of my dog?" in a fresh session — correctly
-   answered that it had no information, rather than hallucinating. The
-   mechanics are sound (chronological order, cost separation, no leak); the
-   substance is that `extractMemories`'s production prompt is scoped to
-   "durable memories from a coding session" across four types (user,
-   feedback, project, reference), and on this one trial with this one model
-   did not judge a personal biographical fact worth saving. LongMemEval's
-   question types are general-assistant-shaped (preferences, biographical
-   detail, plans), not coding-project-shaped — **running the real corpus as
-   the production prompt stands today would likely measure a domain-scope
-   gap, not a retrieval or consolidation failure.** This is a single trial,
-   not a replicate — but it is exactly what "validate with tiny synthetic
-   fixtures before running the corpus" is for. #6 was run anyway, with that
-   caveat stated up front, and confirmed it at scale.
-6. [x] **External evaluation.** Run 2026-09-26 as an **adapted subset, not
-   an official LongMemEval score** — full method, deviations and per-sample
-   detail in spec §7.4; reproduce with `pnpm bench:longmemeval`
-   (`scripts/longmemeval.ts`). 24 of 500 questions, stratified over all six
-   question types (seed 20260926), MiniMax-M3 as the agent. Result:
-   **answerable questions 1/18, and that one was answered from world
-   knowledge (a Borges quote), not memory — memory-attributable recall
-   0/18**; abstention questions 5/5 (the model honestly says it has no
-   record, which is the right answer there). The cause is upstream of
-   retrieval: `extractMemories` kept **4 memories from 1,090 ingested
-   sessions** (0.4%), so recall had nothing to find. This confirms the #5
-   smoke finding at scale — the production extraction prompt is scoped to
-   coding sessions, and LongMemEval's personal-assistant facts do not clear
-   it. Not tuned on (the prompt was not changed to chase this number).
-   Whether FreeCode's memory *should* capture this kind of fact is a product
-   scope question, not a bug — it is recorded, not decided.
-
-Completion requires both a working harness and a recorded experiment for
-each question. Remove completed entries from this roadmap only after moving
-their method and results into the spec, `EVAL.md`, and experiment ledger.
-
 ## Memory graph explorer (moved out of the memory-efficiency spec, 2026-09-25)
 
 Presentation only: none of this changes what is injected or what it costs.
@@ -285,21 +170,3 @@ for what makes its long-running sessions survivable.
       `CONNECTING` (`use-websocket.ts:19`, `:61`). The TUI's
       `[250, 1_000, 3_000]`-then-give-up budget (`apps/tui/src/ipc/client.ts:87`)
       is right for a local child process but wrong for a network client.
-
-## Open design questions
-
-### `/agents (N)` counts running agents, which is almost always 1 (added 2026-09-08)
-
-**Status:** open design question, not a bug.
-
-`AgentTool` declares `isConcurrencySafe: false`, so `planToolBatches` puts every
-`agent` call in its own batch and subagents run strictly one at a time. The
-ModeLine chip counts RUNNING agents, so it reads `(1)` whenever anything is
-delegated and nothing otherwise — the roster accumulates rows, the chip does
-not. Three options, none obviously right:
-
-- leave it (honest about what is running, matches the `/shells` chip);
-- count agents spawned this session, so the chip matches the roster's length;
-- make `agent` concurrency-safe so they genuinely run in parallel. That is the
-  Claude Code behaviour, but the tool is marked `isDestructive` deliberately,
-  and parallel subagents mutating one tree is what that flag guards against.
