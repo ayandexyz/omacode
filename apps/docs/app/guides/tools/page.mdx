@@ -1,11 +1,11 @@
 ---
 title: "Tools"
-description: "The 16 built-in tools and how they execute."
+description: "The 19 built-in tools and how they execute."
 ---
 
 # Tools
 
-Tools are how the model acts on your machine. FreeCode ships 16 built-ins —
+Tools are how the model acts on your machine. FreeCode ships 19 built-ins —
 file I/O, search, code intelligence, shell, web access, sub-agents, memory — plus
 whatever an MCP server exposes. Concurrency-safe tools are batched and run in
 parallel; mutating tools run one at a time, in order.
@@ -38,12 +38,28 @@ is reported as above. The one exception: when the agent set `timeout` itself
 below the cap, it meant "stop it then", so the command is killed and the
 agent sees the partial output.
 
+**Watching a run as it happens: `monitor`.** A background shell reports once,
+at exit. `monitor` runs a command in the background and sends the agent a
+notification for each batch of output lines while it runs — or only the lines
+matching a `pattern`, e.g. `FAIL|Error|Traceback`. So "run the eval and tell me
+the first failure" gets an answer at the first failure, not three hours later.
+Lines arriving within a second are one notification; a monitor stops itself
+after 20 notifications (the filter was too loose) or after `timeout_ms`
+(default 5 minutes, at most 60), and sends a final notification when it ends.
+It needs notifications on, and its permission rules match on the command
+exactly like `bash`'s (`Monitor(pnpm eval:*)`).
+
 | Setting | Effect |
 | --- | --- |
-| `tasks.notify: false` in `settings.json`, or `FREECODE_TASK_NOTIFY=0` | No notifications, so no turn ever starts without you. Background shells still run; the agent has to check them with `bashoutput`. |
+| `tasks.notify: false` in `settings.json`, or `FREECODE_TASK_NOTIFY=0` | No notifications, so no turn ever starts without you. Background shells still run; the agent has to check them with `bashoutput`. `monitor` is unavailable. |
 
-Shells die with their session, and with FreeCode itself: a command that must
-outlive the session belongs in your own terminal.
+**When a background task is stopped early.** Shells die with their session and
+with FreeCode itself — a command that must outlive the session belongs in your
+own terminal. What changes is that the agent is told: when you resume a session
+whose background tasks were stopped before finishing (you switched away,
+FreeCode restarted or crashed), you see a notice listing them, and the agent is
+told on your next message instead of waiting for a result that cannot come.
+Resuming never starts a turn by itself.
 
 ## On this page (coming soon)
 

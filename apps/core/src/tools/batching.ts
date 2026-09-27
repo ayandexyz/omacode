@@ -1,7 +1,8 @@
 // =============================================================================
 // Tool batching plan
 // Groups a sequence of tool calls into batches that can run in parallel.
-// A batch is parallel iff every tool in it has behavior.isConcurrencySafe = true.
+// A batch is parallel iff every call in it is concurrency-safe: the tool's
+// behavior.isConcurrencySafe, or its per-call `concurrencySafeFor(args)`.
 // Sequential tools (or tools whose behavior is unknown) always occupy their own
 // batch so ordering guarantees around writes/edits/shell are preserved.
 // =============================================================================
@@ -14,22 +15,27 @@ export interface ToolBatch {
   parallel: boolean;
 }
 
-export type IsConcurrencySafeFn = (toolName: string) => boolean;
+export type IsConcurrencySafeFn = (call: { tool: string; args?: unknown }) => boolean;
 
-const defaultIsSafe: IsConcurrencySafeFn = (name) =>
-  getTool(name)?.behavior?.isConcurrencySafe === true;
+const defaultIsSafe: IsConcurrencySafeFn = ({ tool, args }) => {
+  const behavior = getTool(tool)?.behavior;
+  if (!behavior) return false;
+  return behavior.concurrencySafeFor
+    ? behavior.concurrencySafeFor(args)
+    : behavior.isConcurrencySafe === true;
+};
 
-export function planToolBatches<T extends { tool: string }>(
+export function planToolBatches<T extends { tool: string; args?: unknown }>(
   toolCalls: readonly T[],
   isSafe: IsConcurrencySafeFn = defaultIsSafe,
 ): ToolBatch[] {
   const batches: ToolBatch[] = [];
   let i = 0;
   while (i < toolCalls.length) {
-    const startSafe = isSafe(toolCalls[i].tool);
+    const startSafe = isSafe(toolCalls[i]);
     let j = i + 1;
     if (startSafe) {
-      while (j < toolCalls.length && isSafe(toolCalls[j].tool)) j++;
+      while (j < toolCalls.length && isSafe(toolCalls[j])) j++;
     }
     batches.push({ start: i, end: j, parallel: startSafe && j - i > 1 });
     i = j;

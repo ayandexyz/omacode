@@ -18,6 +18,7 @@ import { listProviders } from "../providers/registry.js";
 import { getAgentRegistry } from "../agent/registry/index.js";
 import { disposeSubagentShells } from "./shells/index.js";
 import { notifyTask, taskNotificationsEnabled } from "../agent/task-notify.js";
+import { recordEnd, recordStart } from "../agent/background-ledger.js";
 
 interface AgentParams {
   task: string;
@@ -66,7 +67,7 @@ const agentSchema: JsonSchema = {
     run_in_background: {
       type: "boolean",
       description:
-        "If true, return immediately and keep working (or end your turn) while the sub-agent runs. Its result arrives later as a <task-notification> message — do not poll or wait for it. Required for sub-agents to run at the same time: several foreground agent calls run one after another.",
+        "If true, return immediately and keep working (or end your turn) while the sub-agent runs. Its result arrives later as a <task-notification> message — do not poll or wait for it. Not needed for parallelism: read-only agent calls made in one response already run at the same time.",
     },
   },
   required: ["task", "prompt"],
@@ -411,7 +412,13 @@ async function executeSubagent(
   // The parent's turn does not wait. Whatever happens — success, failure, a
   // stop from /agents — the parent is told, or it would wait on a result
   // that never comes. A session that ended first is dropped by the sink.
+  recordStart(parentSessionId, {
+    id: subagentId,
+    kind: "agent",
+    summary: params.task,
+  });
   void runToCompletion().then((result) => {
+    recordEnd(parentSessionId, subagentId);
     const status = killed()
       ? "killed"
       : result.success && result.result.metadata?.success
@@ -473,7 +480,8 @@ Use it when the work would burn context you have no further use for ("find every
 - It is READ-ONLY by default and cannot write, edit, or run bash. When the task is to change code you must pass readOnly: false, or it will fail; it then runs with this session's permissions.
 - It cannot spawn sub-agents of its own. If your task needs delegating twice, do the outer half yourself.
 - Its result is not shown to the user — relay what matters yourself.
-- run_in_background: true returns at once and delivers the result later as a <task-notification>. Use it for long work you don't need before your next step. To run several agents in parallel, set it on each: foreground agent calls run one after another, even when made in the same response.`,
+- To run several in parallel, make the calls in one response: read-only agents run at the same time and you get every result together. A writing agent (readOnly: false) always runs alone.
+- run_in_background: true returns at once and delivers the result later as a <task-notification>. Use it for long work you don't need before your next step.`,
   schemas: {
     parameters: agentSchema,
   },
@@ -483,6 +491,13 @@ Use it when the work would burn context you have no further use for ("find every
   },
   behavior: {
     isConcurrencySafe: false,
+    // Read-only sub-agents may run side by side: explore mode removes
+    // write/edit/bash from their tool list, so two cannot race on the tree.
+    // A writing one stays sequential. Models ask for parallel work by putting
+    // two calls in one response — MiniMax-M3 does exactly that (the
+    // `delegation` eval), and those used to run one after the other.
+    concurrencySafeFor: (args) =>
+      coerceBoolean((args as AgentParams | undefined)?.readOnly) !== false,
     // A subagent runs arbitrary tools of its own and can mutate the
     // filesystem, so this must read the same as write/edit: triggers the
     // verify gate, counts toward stagnation, and is not safely retryable.

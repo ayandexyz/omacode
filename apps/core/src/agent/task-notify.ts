@@ -1,8 +1,9 @@
 // =============================================================================
 // Task notifications — how a background task tells the model it finished.
 //
-// Two kinds: a background sub-agent (`agent(run_in_background)`) and a
-// background shell (`bash(run_in_background)`) exiting.
+// Three kinds: a background sub-agent (`agent(run_in_background)`), a
+// background shell (`bash(run_in_background)`) exiting, and a `monitor` — which
+// also sends `event`s while it runs, one per batch of matching output lines.
 //
 // Claude Code's shape (ROADMAP "Background shell completion notifications"):
 // the finished task becomes a `<task-notification>` user-role message. If the
@@ -34,8 +35,9 @@ import { envFlag } from "./signals/settings.js";
 
 export interface TaskNotification {
   taskId: string;
-  kind: "agent" | "shell";
-  status: "completed" | "failed" | "killed";
+  kind: "agent" | "shell" | "monitor";
+  /** `event`: a monitor matched new output and is still running. */
+  status: "completed" | "failed" | "killed" | "event";
   /** One line: what the task was (the agent's task, the shell's command). */
   summary: string;
   /** What the task produced — the text a foreground call would have returned. */
@@ -75,15 +77,22 @@ export function formatTaskNotification(n: TaskNotification): string {
     n.result,
     "</result>",
     "</task-notification>",
-    "A background task you started has finished. Relay what matters to the user — they have not seen this result.",
+    n.status === "event"
+      ? "A monitor you started matched new output and is still running. Act on it if it matters; otherwise carry on."
+      : "A background task you started has finished. Relay what matters to the user — they have not seen this result.",
   ].join("\n");
 }
 
 /** The one-liner the frontend shows where the notification arrived. */
 export function taskNotice(n: TaskNotification): string {
-  const what = n.kind === "agent" ? "Background agent" : "Background command";
+  const what =
+    n.kind === "agent" ? "Background agent" : n.kind === "monitor" ? "Monitor" : "Background command";
   const summary = n.summary.split("\n")[0]!;
   const short = summary.length > 80 ? `${summary.slice(0, 79)}…` : summary;
+  if (n.status === "event") {
+    const first = n.result.split("\n").find((l) => l.trim()) ?? "";
+    return `${what} ${short}: ${first.length > 100 ? `${first.slice(0, 99)}…` : first}`;
+  }
   return `${what} ${n.status}: ${short}`;
 }
 

@@ -14,6 +14,11 @@ import type { ToolContext } from "./types.js";
 export interface ToolBehavior {
   // Whether this tool can run concurrently with other tools
   isConcurrencySafe: boolean;
+  /**
+   * Per-call override of `isConcurrencySafe`, for a tool whose safety depends
+   * on its arguments — `agent` is safe to parallelize only when read-only.
+   */
+  concurrencySafeFor?: (args: unknown) => boolean;
   // Whether this tool modifies files/system (affects confirmation prompts)
   isDestructive: boolean;
   // How to handle interruption while this tool is running

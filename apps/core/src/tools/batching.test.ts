@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { planToolBatches } from "./batching.js";
 
 const SAFE = new Set(["read", "grep", "glob", "skill"]);
-const isSafe = (name: string) => SAFE.has(name);
+const isSafe = (call: { tool: string }) => SAFE.has(call.tool);
 
 function call(tool: string) {
   return { tool };
@@ -55,6 +55,30 @@ test("planToolBatches handles all-sequential input as N solo batches", () => {
     [call("write"), call("edit"), call("bash")],
     isSafe,
   );
+  assert.deepEqual(plan, [
+    { start: 0, end: 1, parallel: false },
+    { start: 1, end: 2, parallel: false },
+    { start: 2, end: 3, parallel: false },
+  ]);
+});
+
+// With the real registry: `agent` is parallel-safe per call, by readOnly.
+test("read-only agent calls in one response form one parallel batch", () => {
+  const plan = planToolBatches([
+    { tool: "agent", args: { task: "a", prompt: "a" } },
+    { tool: "agent", args: { task: "b", prompt: "b", readOnly: true } },
+    { tool: "read", args: { filePath: "x" } },
+  ]);
+  assert.deepEqual(plan, [{ start: 0, end: 3, parallel: true }]);
+});
+
+test("a writing agent call runs alone, whatever its neighbours", () => {
+  const plan = planToolBatches([
+    { tool: "agent", args: { task: "a", prompt: "a" } },
+    { tool: "agent", args: { task: "b", prompt: "b", readOnly: false } },
+    // Providers send booleans as strings; "false" must not read as read-only.
+    { tool: "agent", args: { task: "c", prompt: "c", readOnly: "false" } },
+  ]);
   assert.deepEqual(plan, [
     { start: 0, end: 1, parallel: false },
     { start: 1, end: 2, parallel: false },

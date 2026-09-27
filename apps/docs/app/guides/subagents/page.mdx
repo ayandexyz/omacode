@@ -110,9 +110,10 @@ foreground or background, read-only or writing, for it. What the model is told:
   `readOnly: false`, or the sub-agent can't do it.
 - It cannot spawn sub-agents of its own.
 - Its result is not shown to the user, so relay what matters.
+- To run several in parallel, make the calls in one response: read-only
+  sub-agents run at the same time. A writing one always runs alone.
 - Use `run_in_background: true` for long work it doesn't need before its next
-  step. To run several in parallel, set it on each: foreground `agent` calls run
-  one after another, even when made in the same response.
+  step.
 
 **You can always override** by saying so in your message ("use a background
 sub-agent", "don't delegate this"). The only sub-agent the harness spawns
@@ -188,15 +189,10 @@ background shell a sub-agent started dies with that sub-agent.
 
 ## Known gaps
 
-- **Results do not survive a core restart.** The roster and pending
-  notifications are in memory. A background sub-agent running when core dies
-  is lost.
-- **Foreground sub-agents never run at the same time.** `agent` is not
-  concurrency-safe, so two `agent` calls in one response run one after
-  another. Strong models reach for `run_in_background` to parallelize; the
-  `delegation` eval found MiniMax-M3 batches two foreground calls instead
-  (0/6 across two runs, even after the description said so). Running
-  read-only foreground sub-agents concurrently is tracked in `ROADMAP.md`.
+- **Results do not survive a core restart.** A background sub-agent running
+  when core exits is stopped. It is no longer silent: on resume you get a
+  notice, and the agent is told on your next message (see
+  [long-running commands](/guides/tools#long-running-commands)).
 - **The named roles are mostly unused.** `agent/types.ts` defines `explorer`,
   `reviewer`, `tester`, `summarizer` and `verifier`, but only `verifier` is
   wired (the verify gate). The `agent` tool has no role argument; the

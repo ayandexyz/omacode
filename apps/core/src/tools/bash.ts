@@ -25,6 +25,7 @@ import {
   notifyTask,
   taskNotificationsEnabled,
 } from "../agent/task-notify.js";
+import { recordEnd, recordStart } from "../agent/background-ledger.js";
 
 interface BashParams {
   command: string;
@@ -163,12 +164,27 @@ export async function _executeBash(
  * `adopt` takes over a foreground one that outlived its timeout. Throws when
  * the session is at its shell cap.
  */
-function trackShell(
+export function trackShell(
   params: BashParams,
   ctx: ToolContext,
   cwd: string,
   sessionId: string,
   launch: (registry: ShellRegistry, options: ShellStartOptions) => ShellSummary,
+  /**
+   * For a caller with its own reporting (`monitor`): extra per-chunk and exit
+   * hooks, and `notifyOnExit: false` to replace the standard exit notification.
+   */
+  hooks: {
+    onData?: (id: string, chunk: string) => void;
+    onExit?: (
+      id: string,
+      status: Exclude<ShellSummary["status"], "running">,
+      exitCode: number | null,
+    ) => void;
+    notifyOnExit?: boolean;
+    /** How the background ledger labels it. */
+    kind?: "shell" | "monitor";
+  } = {},
 ): { shell: ShellSummary; notify: boolean } {
   // Stamped with the ROOT session id, like agent_* events: the frontend
   // subscribes to the root and filters everything else out, so a subagent's
@@ -178,6 +194,9 @@ function trackShell(
   // Read once, at start: the start message has to say whether an exit will be
   // reported, and the answer must not change under the model mid-run.
   const notify = taskNotificationsEnabled(ctx.projectPath ?? cwd);
+  // Set once the start is recorded; the exit handler can run before that
+  // only for a shell that died instantly, which then never needs a record.
+  let ledgered = false;
   const shell = launch(registry, {
     command: params.command,
     cwd,
@@ -188,6 +207,7 @@ function trackShell(
         shellId: id,
         chunk,
       });
+      hooks.onData?.(id, chunk);
     },
     onExit: (id, status, exitCode) => {
       if (status === "running") return;
@@ -197,6 +217,9 @@ function trackShell(
         status,
         exitCode,
       });
+      if (ledgered) recordEnd(sessionId, id);
+      hooks.onExit?.(id, status, exitCode);
+      if (hooks.notifyOnExit === false) return;
       // To the session that started it (a subagent's shell tells the
       // subagent, and is dropped if that subagent is gone). Skipped when
       // the model already knows — see ShellRegistry.modelKnowsEnd.
@@ -218,6 +241,15 @@ function trackShell(
     command: shell.command,
     cwd: shell.cwd,
   });
+  // Root sessions only: a subagent's shells die with the subagent anyway.
+  if (rootId === sessionId && shell.status === "running") {
+    ledgered = true;
+    recordStart(sessionId, {
+      id: shell.id,
+      kind: hooks.kind ?? "shell",
+      summary: params.command,
+    });
+  }
   return { shell, notify };
 }
 

@@ -110,6 +110,11 @@ import { openBrowser } from "./utils/open-browser.js";
 import { randomUUID } from "crypto";
 import { createRecorder } from "./rollout/recorder.js";
 import { setTaskNotificationSink } from "./agent/task-notify.js";
+import {
+  lostTasksNotification,
+  markProcessExiting,
+  takeOrphans,
+} from "./agent/background-ledger.js";
 import { CheckpointService } from "./checkpoint/index.js";
 import type { SerializedMessage } from "./session/store.js";
 import type { FileChange } from "./checkpoint/index.js";
@@ -185,6 +190,11 @@ const pendingNotifications = new Map<
 >();
 const notificationTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const NOTIFY_COALESCE_MS = 250;
+
+// Notifications held for the session's NEXT turn rather than starting one:
+// background tasks lost in a core restart, found on session.resume. Resuming
+// a session must not by itself start a paid turn.
+const deferredNotifications = new Map<string, string[]>();
 
 function queueTaskNotification(
   sessionId: string,
@@ -354,6 +364,12 @@ async function runSessionTurn(
     startingTurns.delete(sessionId);
   }
   activeLoops.set(sessionId, loop);
+  // run() leaves pendingSteers alone, so these reach the model before its
+  // first call of this turn.
+  for (const text of deferredNotifications.get(sessionId) ?? []) {
+    loop.steer(text, randomUUID(), "task_notification");
+  }
+  deferredNotifications.delete(sessionId);
   if (input.origin) {
     BusEvents.stream(sessionId, {
       type: "turn_started",
@@ -1515,6 +1531,20 @@ export const methodHandlers: Record<
     // next end runs the disposers and the final flush.
     reviveSession(context.id);
 
+    // Background tasks a previous core process was running for this session
+    // died with it. Say so — once, now, to the user; and to the model on the
+    // next turn, instead of leaving it waiting for notifications that cannot
+    // come.
+    const orphans = takeOrphans(context.id);
+    if (orphans.length > 0) {
+      deferredNotifications.set(context.id, [lostTasksNotification(orphans)]);
+      BusEvents.stream(context.id, {
+        type: "notice",
+        level: "warn",
+        content: `${orphans.length} background task${orphans.length === 1 ? " was" : "s were"} stopped before finishing (session closed or FreeCode restarted): ${orphans.map((o) => o.summary.split("\n")[0]!.slice(0, 60)).join("; ")}. The agent will be told on your next message.`,
+      });
+    }
+
     // Return shape the TUI client expects: { sessionId, messages }
     return {
       sessionId: context.id,
@@ -1861,6 +1891,9 @@ export async function startServer() {
   // actually end, and it was the path that mined nothing and leaked all six
   // per-session caches.
   process.on("exit", () => {
+    // Before the kills below: they are losses to report on resume, not
+    // tasks finishing (see agent/background-ledger.ts).
+    markProcessExiting();
     hookSettings.dispose();
     // Synchronous backstop: a background shell must not outlive the daemon
     // even on an exit path that never ran endSession (crash, plain exit).
@@ -1874,6 +1907,7 @@ export async function startServer() {
   const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
+    markProcessExiting();
     // Abort in-flight provider/tool calls first: the flush below reads the
     // persisted transcript, so waiting for a turn to finish buys nothing and
     // delays the exit.

@@ -14,6 +14,11 @@
 
 import { disposeSessionMemory } from "../memory/index.js";
 import { disposeAgentsForRoot } from "../agent/registry/index.js";
+import {
+  clearLedger,
+  markSessionEnding,
+  reviveLedger,
+} from "../agent/background-ledger.js";
 import { resetExtractPolicy } from "../memory/extract-policy.js";
 import { disposeOutputStore } from "../tools/output-store/index.js";
 import { disposeShellRegistry } from "../tools/shells/index.js";
@@ -84,6 +89,7 @@ function markEnded(sessionId: string): boolean {
  */
 export function reviveSession(sessionId: string): void {
   ended.delete(sessionId);
+  reviveLedger(sessionId);
 }
 
 /** Test seam: forget which sessions have ended. */
@@ -103,6 +109,11 @@ export async function endSession(
   options: EndSessionOptions,
 ): Promise<void> {
   if (!markEnded(sessionId)) return;
+  // Before the disposers kill its background tasks: a task stopped by the
+  // session ending must be reported on resume, not quietly erased. A deleted
+  // session has no resume to report to.
+  if (options.reason === "delete") clearLedger(sessionId);
+  else markSessionEnding(sessionId, options.reason);
 
   // Disposers first, and each independently: one throwing must not strand the
   // other five, which is the failure this consolidation is meant to prevent.

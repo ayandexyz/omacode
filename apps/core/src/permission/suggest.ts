@@ -4,7 +4,7 @@
 // =============================================================================
 
 import * as path from "path";
-import { extractTarget } from "./rules.js";
+import { COMMAND_TOOLS, extractTarget } from "./rules.js";
 
 const DISPLAY_NAMES: Record<string, string> = {
   read: "Read",
@@ -16,6 +16,7 @@ const DISPLAY_NAMES: Record<string, string> = {
   bash: "Bash",
   bashoutput: "BashOutput",
   killbash: "KillBash",
+  monitor: "Monitor",
   webfetch: "WebFetch",
   websearch: "WebSearch",
   agent: "Agent",
@@ -43,7 +44,7 @@ export function suggestRule(
   const name = displayName(toolName);
   const target = extractTarget(tool, args);
 
-  if (tool === "bash" && target) {
+  if (COMMAND_TOOLS.has(tool) && target) {
     const prefix = target.trim().split(/\s+/).slice(0, 2).join(" ");
     return `${name}(${prefix}:*)`;
   }
