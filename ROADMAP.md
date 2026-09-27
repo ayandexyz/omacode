@@ -140,6 +140,9 @@ for what makes its long-running sessions survivable.
 
 ### Unattended mode (blocks `autonomous/` Phase 1)
 
+Design now in `docs/specs/2026-09-28-overnight-runs.md`: per-iteration turn/time caps
+and reset-on-failure answer the first item; the permission envelope answers the second.
+
 - [ ] **No configuration in which a stuck loop stops itself.**
       `effect/loop-health.ts` declares `LoopAction { continue | warn | stop }`
       and returns `warn` from all four detectors (`:38`, `:44`, `:53`, `:62`);

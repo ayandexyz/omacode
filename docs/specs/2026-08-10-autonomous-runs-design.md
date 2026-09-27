@@ -1,6 +1,7 @@
 # Autonomous Runs — Bounded and Ambient Unattended Work for FreeCode
 
-> **Status:** Design
+> **Status:** Design. Phase 0 built. **Phases 1–5 superseded by
+> `2026-09-28-overnight-runs.md`** (iteration loop, permission envelope, quota waits).
 > **Date:** 2026-08-10
 > **Prior art:** Prime Intellect's Prime Agent (`/autonomous`), Apache-2.0, TypeScript,
 > local clone `~/Projects/githubProjects/agents/prime-agent`, primary file
