@@ -701,7 +701,12 @@ export const methodHandlers: Record<
     //
     // Images are out of scope for v1: dropping them silently is data loss, so
     // the rejection forces the user to wait until the in-flight turn ends.
-    if (activeLoops.has(sessionId)) {
+    //
+    // `startingTurns` counts as busy: runSessionTurn builds its loop behind an
+    // await before registering it, and two sends in that window each started
+    // a turn — two loops appending to one transcript (user, user, assistant,
+    // assistant). A steer there has no loop to reach yet, so it queues.
+    if (activeLoops.has(sessionId) || startingTurns.has(sessionId)) {
       if (images && images.length > 0) {
         throw new Error(
           "Cannot queue a message with images while a turn is in progress. " +

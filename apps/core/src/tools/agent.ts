@@ -237,7 +237,13 @@ async function executeSubagent(
   // `k` in the /agents panel settles the record to "killed" before the loop
   // exists (stop() fires the interrupt on attach), so the loop's own result
   // cannot be trusted to say so — the record is the source of truth.
-  const killed = () => agents.get(subagentId)?.status === "killed";
+  // A missing record counts too: session end and daemon shutdown dispose the
+  // roster (stop, then forget), and a running record is removed no other way.
+  // Reading "gone" as "not killed" reported a shutdown as `completed`.
+  const killed = () => {
+    const record = agents.get(subagentId);
+    return !record || record.status === "killed";
+  };
 
   // Read-only unless the spawner opts out. `explore` is not advisory: mutating
   // tools are filtered out of the tool list entirely (tools/defs-cache.ts), so

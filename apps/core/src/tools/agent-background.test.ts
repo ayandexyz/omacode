@@ -177,3 +177,23 @@ test("a subagent runs on the parent run's model, not the provider default", asyn
     rmSync(project, { recursive: true, force: true });
   }
 });
+
+test("a background agent disposed with its session reports killed, not completed", async () => {
+  const project = mkdtempSync(join(tmpdir(), "freecode-agent-bg-project-"));
+  let resolveDelivered!: (text: string) => void;
+  const arrived = new Promise<string>((r) => (resolveDelivered = r));
+  const prev = setTaskNotificationSink((_sid, text) => resolveDelivered(text));
+  try {
+    const result = await AgentTool.execute(
+      { task: "t", prompt: "p", agentType: "bg-fake", run_in_background: true },
+      { sessionId: "root-dispose", cwd: project, projectPath: project, hooks: createHookRuntime() } as never,
+    );
+    assert.equal(result.success, true);
+    // Session end / daemon shutdown: stop, then forget the record.
+    getAgentRegistry().disposeRoot("root-dispose");
+    assert.match(await arrived, /<status>killed<\/status>/);
+  } finally {
+    setTaskNotificationSink(prev);
+    rmSync(project, { recursive: true, force: true });
+  }
+});
