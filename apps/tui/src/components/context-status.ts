@@ -6,71 +6,67 @@ import { formatTokenCount } from "../utils/format-tokens.js";
 
 // Sized to the widest miss row with the longest built-in reason,
 // "12.3> 999.9k miss (harness: prefix rewritten)" — 45 columns; a documented
-// reason (journal source + detail) is truncated to fit. The summary line
-// "yield 100% · last 100% · session 100%" is 37.
+// reason (journal source + detail) is truncated to fit.
 const MAX_WIDTH = 46;
 
 /** Most recent misses shown before folding the rest into "… N more". */
 const MAX_MISS_ROWS = 5;
 
 /**
- * ContextBox — a top-right overlay showing context-window usage as
- * `tokens / limit` (e.g. `1.5K / 500K`), then the session's prompt-cache
- * accounting in jcode's KV-cache-widget shape:
+ * Context usage and prompt-cache accounting, drawn in the normal layout
+ * rather than floating over it. It used to be a top-right overlay, which
+ * covered whatever conversation text scrolled under it — pi-tui overlays
+ * cannot reserve the space beneath them.
  *
- *   yield 99% · last 97% · session 91%
- *   miss attribution
- *   3.2> 40.1k miss (model switch)
+ * Two pieces:
+ *   - `contextSummary()` — the status row under the input, left side:
+ *       12.3K / 200.0K · yield 99% · last 97% · session 91%
+ *     (`tokens / limit`, then jcode's KV-cache-widget ratios). Before core has
+ *     reported stats, the last run's plain hit rate (`cache 87%`) stands in.
+ *   - `ContextMisses` — rows under the status row listing cache misses, shown
+ *     only when there are any: "none" was a permanent row saying nothing.
  *
  * `yield` is the harness-health number (read ÷ what the previous request made
  * cacheable), `last`/`session` the cost numbers (read ÷ prompt). Every ratio
- * comes from core (`cache_status.stats`); this only draws. Before core has
- * reported stats, the last run's plain hit rate (`cache 87%`) stands in.
- *
- * Renders nothing when the limit is unknown, so it never fabricates numbers.
- *
- * Renders at a fixed width (`width()`) so callers can pass it to the overlay
- * system and have it anchor correctly to the right edge — without an explicit
- * width, pi-tui defaults the overlay width to 80 cols, which would push the
- * line into the middle of a wide terminal.
+ * comes from core (`cache_status.stats`); this only draws. Nothing renders
+ * while the limit is unknown, so it never fabricates numbers.
  */
-export class ContextBox implements Component {
+export interface ContextSummary {
+  /** `tokens / limit`, dim. */
+  tokens: string;
+  /** The coloured cache line, or null before any cache data exists. */
+  cache: string | null;
+}
+
+export function contextSummary(
+  contextTokens: number,
+  contextLimit: number,
+  cacheRate: number | undefined,
+  stats: CacheStats | undefined,
+): ContextSummary | null {
+  if (contextLimit <= 0) return null;
+  const fmt = (n: number) => formatTokenCount(n).toUpperCase();
+  const cache = stats
+    ? renderCacheSummary(stats)
+    : cacheRate !== undefined
+      ? chalk.dim(`cache ${cacheRate}%`)
+      : null;
+  return { tokens: `${fmt(contextTokens)} / ${fmt(contextLimit)}`, cache };
+}
+
+/** Cache-miss rows under the status row; renders nothing without misses. */
+export class ContextMisses implements Component {
   constructor(
-    private getVisible: () => boolean,
-    private getContextTokens: () => number,
-    private getContextLimit: () => number,
-    private getCacheRate: () => number | undefined = () => undefined,
-    private getCacheStats: () => CacheStats | undefined = () => undefined,
+    private getStats: () => CacheStats | undefined,
+    /** Columns to indent by, so the rows line up with the prompt text. */
+    private getIndent: () => number = () => 0,
   ) {}
 
-  /** Line width in columns (fixed regardless of terminal width). */
-  width(): number {
-    return MAX_WIDTH;
-  }
-
   render(width: number): string[] {
-    if (!this.getVisible()) return [];
-    if (width < MAX_WIDTH) return [];
-
-    const limit = this.getContextLimit();
-    if (limit <= 0) return [];
-
-    const tokens = this.getContextTokens();
-    const fmt = (n: number) => formatTokenCount(n).toUpperCase();
-    const lines = [chalk.dim(`${fmt(tokens)} / ${fmt(limit)}`)];
-
-    const stats = this.getCacheStats();
-    if (stats) {
-      lines.push(renderCacheSummary(stats), ...renderMissAttribution(stats));
-    } else {
-      const rate = this.getCacheRate();
-      if (rate !== undefined) lines.push(chalk.dim(`cache ${rate}%`));
-    }
-
-    // Right-align so the lines stay flush against the edge they're anchored to.
-    return lines.map(
-      (line) => " ".repeat(Math.max(0, width - visibleWidth(line))) + line,
-    );
+    const stats = this.getStats();
+    if (!stats || stats.misses.length === 0 || width < MAX_WIDTH) return [];
+    const pad = " ".repeat(this.getIndent());
+    return renderMissAttribution(stats).map((line) => pad + line);
   }
 
   invalidate(): void {}
@@ -105,13 +101,10 @@ function renderCacheSummary(stats: CacheStats): string {
 }
 
 function renderMissAttribution(stats: CacheStats): string[] {
-  const lines = [chalk.dim.bold("miss attribution")];
-  if (stats.misses.length === 0) {
-    lines.push(palette.green("none"));
-    return lines;
-  }
   const total = stats.misses.reduce((sum, m) => sum + m.missedTokens, 0);
-  lines.push(chalk.dim(`${formatTokenCount(total)} missed total`));
+  const lines = [
+    `${chalk.dim.bold("miss attribution")} ${chalk.dim(`· ${formatTokenCount(total)} missed total`)}`,
+  ];
   const recent = stats.misses.slice(-MAX_MISS_ROWS);
   for (const miss of recent) lines.push(renderMissRow(miss));
   const hidden = stats.misses.length - recent.length;

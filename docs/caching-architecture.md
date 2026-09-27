@@ -141,7 +141,7 @@ fires at 60 minutes rather than 5; at `5m` the message names the knob.
 
 ### 1.5a Session cache accounting — `providers/cache-miss.ts`
 
-What the TUI's top-right widget shows (`apps/tui/src/components/context-box.ts`),
+What the TUI's status-row cache readout shows (`apps/tui/src/components/context-status.ts`; a top-right overlay until 2026-09-27),
 and how each number is produced. Spec: `2026-08-09-cache-observability.md`
 §D2 / §D2.2; jcode's original is `crates/jcode-tui/src/tui/info_widget.rs`
 (`CacheHitInfo`) + `app.rs` (`record_completed_stream_cache_usage`).

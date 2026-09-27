@@ -12,6 +12,7 @@ import stripAnsi from "strip-ansi";
 
 import {
   buildStatusLine,
+  layoutStatusLine,
   composerMode,
   formatHistoryIndicator,
   promptGlyph,
@@ -95,6 +96,31 @@ test("buildStatusLine: the indicator is indented to the prompt column", () => {
   assert.equal(line.length, 40);
   assert.ok(line.startsWith("   [3/12]"), line);
   assert.ok(line.endsWith("model · plan"));
+});
+
+test("layoutStatusLine: the context sits left, coloured cache counted by visible width", () => {
+  const cache = "\u001b[32myield 99%\u001b[39m";
+  const out = layoutStatusLine(80, null, "model · build", 3, { tokens: "12K / 200K", cache });
+  assert.ok(out);
+  const plain = stripAnsi(out.line);
+  assert.equal(plain.length, 80, "escape codes must not count toward the width");
+  assert.ok(plain.startsWith("   12K / 200K · yield 99%"));
+  assert.ok(plain.endsWith("model · build"));
+  assert.deepEqual(out.tokens, [3, 13]);
+  assert.deepEqual(out.cache, [16, 25]);
+  assert.equal(plain.slice(out.cache![0], out.cache![1]), "yield 99%");
+});
+
+test("layoutStatusLine: out of room, the cache goes first, then the label", () => {
+  const ctx = { tokens: "12K / 200K", cache: "yield 99% · last 97% · session 91%" };
+  const mid = stripAnsi(layoutStatusLine(40, null, "model · build", 3, ctx)!.line);
+  assert.doesNotMatch(mid, /yield/);
+  assert.match(mid, /12K \/ 200K/);
+  assert.match(mid, /model · build/);
+  const narrow = layoutStatusLine(20, null, "model · build", 3, ctx)!;
+  assert.doesNotMatch(stripAnsi(narrow.line), /model/);
+  assert.match(stripAnsi(narrow.line), /12K \/ 200K/);
+  assert.equal(narrow.cache, undefined, "a dropped part is not clickable");
 });
 
 test("buildStatusLine: a label that would collide with the indicator is dropped", () => {

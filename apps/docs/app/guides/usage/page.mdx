@@ -8,23 +8,28 @@ description: "Track tokens, cache hit rate, and spend."
 FreeCode accumulates usage per turn and records it daily, including prompt-cache
 reads and writes — the single biggest lever on cost for a long session.
 
-## The cache widget (top-right)
+## The cache readout (under the input)
 
-Once a provider has reported cache fields, the top-right corner of the TUI
-shows the session's prompt-cache health. It is the same shape as jcode's KV
-cache widget, and it is hidden on terminals narrower than 90 columns.
+Once a provider has reported cache fields, the status row under the input
+shows the context in use and the session's prompt-cache health, with the model
+and mode on the right. It is the same content as jcode's KV cache widget.
+Cache misses, when there are any, are listed on the rows below it.
 
 ```
-                        12.3K / 200.0K
-    yield 99% · last 97% · session 91%
-                      miss attribution
-        3.2> 40.1k miss (model switch)
+master> _
+   12.3K / 200.0K · yield 99% · last 97% · session 91%      anthropic/claude-opus-5 · build
+   miss attribution · 40.1k missed total
+   3.2> 40.1k miss (model switch)
 ```
 
-**Line 1 — `tokens / limit`.** The context window in use after the last
-model call, against the model's limit. Click it to open `/context`.
+It used to float in the top-right corner, which covered whatever conversation
+text scrolled under it. On a narrow terminal the ratios are dropped first, then
+the model label; the token count stays.
 
-**Line 2 — three ratios.** All three are `cache reads ÷ something`; what
+**`tokens / limit`.** The context window in use after the last model call,
+against the model's limit. Click it to open `/context`.
+
+**The three ratios.** All three are `cache reads ÷ something`; what
 changes is the denominator, and that is the whole point of showing three.
 
 | Label | Reads ÷ … | What it tells you |
@@ -37,7 +42,7 @@ Before the second model call there is nothing to yield against, so the line
 reads `priming` instead. The colour follows the freshest health signal (red
 below 25%, yellow below 60%, blue below 85%, green above).
 
-**Lines 3+ — miss attribution.** Every time a request reads at least 1,024
+**Miss attribution (rows below, only when there are misses).** Every time a request reads at least 1,024
 fewer cached tokens than the previous request left cached, that shortfall is
 listed with which call it was (`3.2>` is your third prompt, the model's second
 call within it; `3>` is the first call), how many tokens were re-sent at full
@@ -51,11 +56,12 @@ price, and why:
 | `provider blip` | The read collapsed for one call and then recovered to exactly the old boundary — so the prefix never changed and the miss was on the provider's side (a write not yet committed, eviction, routing). | No. |
 | `harness: zero read`, `harness: prefix rewritten` | **A bug.** Nothing above explains it and the next call did not recover, so something changed a message that had already been sent. These are in red and also raise the in-chat *Prompt-cache miss* warning. | Report it — `FREECODE_DEBUG_CACHE=1` prints per-segment hashes that show which segment moved. |
 
-`none` means every call since the first reused its prefix. The list keeps the
-last 12 misses and shows the newest 5; click any cache line to open `/cost`.
+No rows means every call since the first reused its prefix. The list keeps the
+last 12 misses and shows the newest 5. Clicking the token count opens
+`/context`; clicking the ratios opens `/cost`.
 
 Related settings: `FREECODE_CACHE_MISS_NOTICES=0` mutes the in-chat warning
-(the widget keeps counting); `FREECODE_CACHE_TTL=1h` lengthens the Anthropic
+(the readout keeps counting); `FREECODE_CACHE_TTL=1h` lengthens the Anthropic
 cache and with it the `expired` threshold.
 
 ## Still to write
