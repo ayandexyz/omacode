@@ -188,10 +188,6 @@ background shell a sub-agent started dies with that sub-agent.
 
 ## Known gaps
 
-- **Background shells do not notify yet.** `bash(run_in_background: true)` is
-  still pull-only: the model has to call `bashoutput` to learn that a shell
-  finished. The notification path exists; wiring shells to it is tracked in
-  `ROADMAP.md`.
 - **Results do not survive a core restart.** The roster and pending
   notifications are in memory. A background sub-agent running when core dies
   is lost.

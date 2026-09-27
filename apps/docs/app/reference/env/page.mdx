@@ -97,7 +97,7 @@ default, because a typo here looks exactly like compaction being broken.
 | `FREECODE_BASH_COMPRESS` | off | per call | `1` turns on [content-aware compression](/internals/cost-efficiency) of large `bash` output: build-log noise collapses, search matches and diffs never do. Off until its A/B earns the default |
 | `FREECODE_LSP_SERVERS` | unset | per call | JSON map of extension → server, e.g. `{".rs":{"command":"rust-analyzer","args":[]}}`. Extends the built-in registry |
 | `FREECODE_RTK` | on | per call | `0` disables the built-in hook that rewrites `ls`-style bash commands into compact `rtk` equivalents |
-| `FREECODE_TASK_NOTIFY` | on | per spawn | `0` stops finished background sub-agents from notifying the agent, so no turn starts without your input. `agent(run_in_background)` then runs in the foreground. Beats `tasks.notify` in `settings.json`. See [background notifications](/guides/subagents#background-notifications) |
+| `FREECODE_TASK_NOTIFY` | on | per spawn | `0` stops finished background sub-agents and shells from notifying the agent, so no turn starts without your input. `agent(run_in_background)` then runs in the foreground; background shells still run. Beats `tasks.notify` in `settings.json`. See [long-running commands](/guides/tools#long-running-commands) |
 
 ## Memory
 

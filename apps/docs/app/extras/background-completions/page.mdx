@@ -42,10 +42,11 @@ Both now exist, so the rule below is live rather than theoretical:
   That turn is the only call that happens, not an extra one on top of a
   schedule, so it is not the polling anti-pattern. See
   [Sub-agents](/guides/subagents#background-notifications).
-- **Background shells** (`bash(run_in_background: true)`) are still pull-only:
-  the model learns a shell finished only by calling `bashoutput`. That is the
-  shape this rule warns about, and wiring shells to the same notification path
-  is the fix (tracked in `ROADMAP.md`).
+- **Background shells** (`bash(run_in_background: true)`, 2026-09-27) follow it
+  the same way: an exit is pushed as a `<task-notification>`, and none is sent
+  when the model already read the finished shell with `bashoutput` — which is
+  the one case that would otherwise buy a redundant turn. See
+  [long-running commands](/guides/tools#long-running-commands).
 
 ## How I implemented it (as a recorded invariant)
 
@@ -67,7 +68,7 @@ background-execution design gets reviewed against this line before it builds.
 
 | Metric | Value |
 | --- | --- |
-| Dedicated polling turns for sub-agents | 0 — results are pushed |
+| Dedicated polling turns for sub-agents and shells | 0 — results are pushed |
 | Cost of enforcing the invariant | 0 tokens, 0 code — it's a design rule |
 | Measured saving | not measured yet; GitHub's 2.3% is the reference point |
 

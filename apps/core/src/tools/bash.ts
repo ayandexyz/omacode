@@ -18,6 +18,8 @@ import { BASH_DESCRIPTION } from "./bash-prompt.js";
 import { classifyCommand } from "./output-compress.js";
 import { spawnShell } from "./shells/spawn.js";
 import { getShellRegistry, shellSessionOf } from "./shells/index.js";
+import type { ShellRegistry, ShellStartOptions } from "./shells/registry.js";
+import type { ShellSummary } from "./shells/types.js";
 import { BusEvents } from "../bus/index.js";
 import {
   notifyTask,
@@ -40,6 +42,14 @@ const DEFAULT_TIMEOUT = 60_000;
 export const MAX_TIMEOUT = 600_000;
 /** Output tail a completion notification carries; bashoutput has the rest. */
 const NOTIFY_TAIL_CHARS = 4_000;
+/** Output shown when a command is moved to the background or killed. */
+const MOVED_OUTPUT_CHARS = 8_000;
+
+function tailChars(text: string, max: number): string {
+  return text.length > max
+    ? `… (${text.length - max} earlier chars not shown)\n${text.slice(-max)}`
+    : text;
+}
 
 /**
  * How often a running foreground command flushes its tail to the frontend.
@@ -68,7 +78,7 @@ const bashSchema: JsonSchema = {
     timeout: {
       type: "number",
       description:
-        "Timeout in milliseconds (default 60000, max 600000). Longer commands must use run_in_background.",
+        "Timeout in milliseconds (default 60000, max 600000). Unset or at the max: a command still running then moves to the background. Set below the max: it is killed then.",
     },
     workdir: {
       type: "string",
@@ -127,6 +137,8 @@ function resolveCwd(params: BashParams, ctx: ToolContext): string {
 export async function _executeBash(
   params: BashParams,
   ctx: ToolContext,
+  /** Test seam: the default timeout, so the move-to-background path runs in ms. */
+  defaultTimeout = DEFAULT_TIMEOUT,
 ): Promise<BashResult> {
   const cwd = resolveCwd(params, ctx);
   // Providers send booleans as strings (see the coercion note in the tool
@@ -137,12 +149,88 @@ export async function _executeBash(
 
   return background
     ? startBackground(params, ctx, cwd)
-    : runForeground(params, ctx, cwd);
+    : runForeground(params, ctx, cwd, defaultTimeout);
 }
 
 // =============================================================================
 // Background mode
 // =============================================================================
+
+/**
+ * Register a shell in the session's registry with the relays every background
+ * shell needs — live output and exit to the /shells panel, and the completion
+ * notification. `launch` does the registry call: `start` spawns a new process,
+ * `adopt` takes over a foreground one that outlived its timeout. Throws when
+ * the session is at its shell cap.
+ */
+function trackShell(
+  params: BashParams,
+  ctx: ToolContext,
+  cwd: string,
+  sessionId: string,
+  launch: (registry: ShellRegistry, options: ShellStartOptions) => ShellSummary,
+): { shell: ShellSummary; notify: boolean } {
+  // Stamped with the ROOT session id, like agent_* events: the frontend
+  // subscribes to the root and filters everything else out, so a subagent's
+  // shells would otherwise never reach /shells.
+  const rootId = shellSessionOf(sessionId);
+  const registry = getShellRegistry(sessionId);
+  // Read once, at start: the start message has to say whether an exit will be
+  // reported, and the answer must not change under the model mid-run.
+  const notify = taskNotificationsEnabled(ctx.projectPath ?? cwd);
+  const shell = launch(registry, {
+    command: params.command,
+    cwd,
+    owner: sessionId,
+    onData: (id, chunk) => {
+      BusEvents.stream(rootId, {
+        type: "shell_output",
+        shellId: id,
+        chunk,
+      });
+    },
+    onExit: (id, status, exitCode) => {
+      if (status === "running") return;
+      BusEvents.stream(rootId, {
+        type: "shell_exit",
+        shellId: id,
+        status,
+        exitCode,
+      });
+      // To the session that started it (a subagent's shell tells the
+      // subagent, and is dropped if that subagent is gone). Skipped when
+      // the model already knows — see ShellRegistry.modelKnowsEnd.
+      if (!notify || registry.modelKnowsEnd(id)) return;
+      notifyTask(sessionId, {
+        taskId: id,
+        kind: "shell",
+        status,
+        summary: params.command,
+        result: shellResult(id, exitCode, registry.tail(id, NOTIFY_TAIL_CHARS)),
+        isStale: () => registry.modelKnowsEnd(id),
+      });
+    },
+  });
+
+  BusEvents.stream(rootId, {
+    type: "shell_start",
+    shellId: shell.id,
+    command: shell.command,
+    cwd: shell.cwd,
+  });
+  return { shell, notify };
+}
+
+/** What the model is told to do with a shell that is now in the background. */
+function backgroundGuidance(id: string, notify: boolean): string[] {
+  return [
+    notify
+      ? "You will get a <task-notification> with its exit code and output tail when it exits. You do not know its result until then: do not state or guess it, and do not poll or sleep waiting. Keep working, or end your turn."
+      : "Completion notifications are off: check on it with bashoutput when you need the result.",
+    `bashoutput(bash_id: "${id}") returns only output that is new since your last call.`,
+    `Stop it with killbash(bash_id: "${id}").`,
+  ];
+}
 
 function startBackground(
   params: BashParams,
@@ -158,59 +246,15 @@ function startBackground(
     };
   }
 
-  // Stamped with the ROOT session id, like agent_* events: the frontend
-  // subscribes to the root and filters everything else out, so a subagent's
-  // shells would otherwise never reach /shells.
-  const rootId = shellSessionOf(sessionId);
-  const registry = getShellRegistry(sessionId);
-  // Read once, at start: the start message has to say whether an exit will be
-  // reported, and the answer must not change under the model mid-run.
-  const notify = taskNotificationsEnabled(ctx.projectPath ?? cwd);
-  let shell;
+  let tracked;
   try {
-    shell = registry.start({
-      command: params.command,
-      cwd,
-      owner: sessionId,
-      onData: (id, chunk) => {
-        BusEvents.stream(rootId, {
-          type: "shell_output",
-          shellId: id,
-          chunk,
-        });
-      },
-      onExit: (id, status, exitCode) => {
-        if (status === "running") return;
-        BusEvents.stream(rootId, {
-          type: "shell_exit",
-          shellId: id,
-          status,
-          exitCode,
-        });
-        // To the session that started it (a subagent's shell tells the
-        // subagent, and is dropped if that subagent is gone). Skipped when
-        // the model already knows — see ShellRegistry.modelKnowsEnd.
-        if (!notify || registry.modelKnowsEnd(id)) return;
-        notifyTask(sessionId, {
-          taskId: id,
-          kind: "shell",
-          status,
-          summary: params.command,
-          result: shellResult(id, exitCode, registry.tail(id, NOTIFY_TAIL_CHARS)),
-          isStale: () => registry.modelKnowsEnd(id),
-        });
-      },
-    });
+    tracked = trackShell(params, ctx, cwd, sessionId, (registry, options) =>
+      registry.start(options),
+    );
   } catch (error) {
     return { success: false, error: String((error as Error).message ?? error) };
   }
-
-  BusEvents.stream(rootId, {
-    type: "shell_start",
-    shellId: shell.id,
-    command: shell.command,
-    cwd: shell.cwd,
-  });
+  const { shell, notify } = tracked;
 
   return {
     success: true,
@@ -219,11 +263,7 @@ function startBackground(
       output: [
         `Started in the background as ${shell.id}.`,
         "",
-        notify
-          ? "You will get a <task-notification> with its exit code and output tail when it exits — do not poll or sleep waiting for it. Keep working, or end your turn."
-          : "Completion notifications are off: check on it with bashoutput when you need the result.",
-        `bashoutput(bash_id: "${shell.id}") returns only output that is new since your last call.`,
-        `Stop it with killbash(bash_id: "${shell.id}").`,
+        ...backgroundGuidance(shell.id, notify),
       ].join("\n"),
       metadata: {
         background: true,
@@ -255,20 +295,31 @@ function runForeground(
   params: BashParams,
   ctx: ToolContext,
   cwd: string,
+  defaultTimeout: number,
 ): Promise<BashResult> {
   return new Promise((resolve) => {
     // Providers send numbers as strings (tool registration checklist).
-    const asked = Number(params.timeout ?? DEFAULT_TIMEOUT);
+    const asked = Number(params.timeout ?? defaultTimeout);
     const timeout = Math.min(
-      Number.isFinite(asked) && asked > 0 ? asked : DEFAULT_TIMEOUT,
+      Number.isFinite(asked) && asked > 0 ? asked : defaultTimeout,
       MAX_TIMEOUT,
     );
-    const { child, killTree } = spawnShell(params.command, cwd);
+    const spawned = spawnShell(params.command, cwd);
+    const { child, killTree } = spawned;
+    // At the timeout a command is moved to the background instead of killed —
+    // unless the model bounded it on purpose with a short explicit `timeout`.
+    // No `timeout`, or one at the cap, means "however long it takes", and a
+    // kill would throw that work away (a multi-hour eval dies at 60s).
+    const mayMove =
+      Boolean(ctx.sessionId) &&
+      (params.timeout === undefined || asked >= MAX_TIMEOUT);
 
     let stdout = "";
     let stderr = "";
     let killed = false;
     let settled = false;
+    /** The move to the background was refused (shell cap); it was killed. */
+    let moveFailed = false;
 
     // Live tail: the frontend shows the last few lines while the command runs,
     // so a three-minute build reports progress instead of looking hung. Only
@@ -301,6 +352,13 @@ function runForeground(
     }, timeout + 3000);
 
     const timer = setTimeout(() => {
+      if (settled) return;
+      // Already exited: let the exit/close path report it normally.
+      const alive = child.exitCode === null && child.signalCode === null;
+      if (alive && mayMove) {
+        if (moveToBackground()) return;
+        moveFailed = true;
+      }
       killed = true;
       killTree("SIGTERM");
     }, timeout);
@@ -314,28 +372,83 @@ function runForeground(
       if (tailTimer) clearInterval(tailTimer);
     };
 
-    child.stdout?.on("data", (data) => {
+    const onStdout = (data: Buffer): void => {
       stdout += data.toString();
       tailDirty = true;
-    });
-
-    child.stderr?.on("data", (data) => {
+    };
+    const onStderr = (data: Buffer): void => {
       stderr += data.toString();
       tailDirty = true;
-    });
+    };
+    child.stdout?.on("data", onStdout);
+    child.stderr?.on("data", onStderr);
 
     // `close` fires only once every stdio pipe is closed — and a surviving
     // grandchild still holds the write end, so it may never fire at all. The
     // tool promise would then never settle and the UI spins forever. Settle
     // shortly after `exit` with whatever was captured; in the normal case
     // `close` wins the race and this timer is cleared.
-    child.on("exit", (code, signal) => {
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
       exitGrace = setTimeout(() => finish(code, signal), 250);
-    });
-
-    child.on("close", (code, signal) => {
+    };
+    const onClose = (code: number | null, signal: NodeJS.Signals | null): void =>
       finish(code, signal);
-    });
+    child.on("exit", onExit);
+    child.on("close", onClose);
+
+    /**
+     * Hand the live process to the session's shell registry and end this
+     * tool call with its id. Returns false when the registry is full, and the
+     * caller falls back to the kill. Adopt first, detach after: both are
+     * synchronous, so no chunk can land between them or twice.
+     */
+    function moveToBackground(): boolean {
+      const initial =
+        stdout + (stderr ? `${stdout ? "\n" : ""}<stderr>\n${stderr}\n</stderr>\n` : "");
+      let tracked;
+      try {
+        tracked = trackShell(params, ctx, cwd, ctx.sessionId!, (registry, options) =>
+          registry.adopt(options, spawned, initial),
+        );
+      } catch {
+        return false;
+      }
+      child.stdout?.off("data", onStdout);
+      child.stderr?.off("data", onStderr);
+      child.off("exit", onExit);
+      child.off("close", onClose);
+      child.off("error", onError);
+      settled = true;
+      cleanup();
+      flushTail();
+
+      const { shell, notify } = tracked;
+      const secs = Math.round(timeout / 1000);
+      resolve({
+        success: true,
+        result: {
+          title: params.command.split("\n")[0].slice(0, 50),
+          output: [
+            initial.trim() ? `Output so far:\n${tailChars(initial, MOVED_OUTPUT_CHARS)}\n` : "",
+            "<bash_metadata>",
+            `Still running after ${secs}s, so it was moved to the background as ${shell.id} instead of being killed. Do not run it again.`,
+            ...backgroundGuidance(shell.id, notify),
+            "</bash_metadata>",
+          ]
+            .filter(Boolean)
+            .join("\n"),
+          metadata: {
+            background: true,
+            movedToBackground: true,
+            shellId: shell.id,
+            command: params.command,
+            cwd,
+            outputKind: classifyCommand(params.command),
+          },
+        },
+      });
+      return true;
+    }
 
     function finish(code: number | null, _signal: NodeJS.Signals | null) {
       if (settled) return;
@@ -369,18 +482,24 @@ function runForeground(
       };
 
       if (killed) {
-        const capped =
-          asked > MAX_TIMEOUT
-            ? ` — the foreground maximum; the ${asked}ms you asked for is more than a foreground command may take`
-            : "";
-        result.output += `\n\n<bash_metadata>\nCommand timed out after ${timeout}ms${capped} (signal sent). If this command is long-running by design, re-run it with run_in_background: true.\n</bash_metadata>`;
         // Surface the timeout as a failure so the loop sees it as such and
         // doesn't conclude "the command ran successfully, just slowly." The
-        // partial output (stdout/stderr captured before the kill) goes into
-        // the error message so the UI can still render it.
+        // partial output and the advice go IN the error: they used to be
+        // appended to a result that was then discarded, so the model saw only
+        // "timed out" and never the suggestion to background it.
         resolve({
           success: false,
-          error: `Command timed out after ${timeout}ms`,
+          error: [
+            moveFailed
+              ? `Command was still running after ${timeout}ms and could not be moved to the background (too many background shells — killbash one), so it was killed.`
+              : `Command timed out after ${timeout}ms (the timeout you set) and was killed.`,
+            "",
+            output === "(no output)"
+              ? "(no output before the kill)"
+              : `Output before the kill:\n${tailChars(output, MOVED_OUTPUT_CHARS)}`,
+            "",
+            "If it is long-running by design, re-run it with run_in_background: true, or without a timeout so it moves to the background by itself.",
+          ].join("\n"),
           code: `TIMEOUT_${timeout}`,
         });
         return;
@@ -389,7 +508,7 @@ function runForeground(
       resolve({ success: true, result });
     }
 
-    child.on("error", (err) => {
+    function onError(err: Error): void {
       if (settled) return;
       settled = true;
       cleanup();
@@ -397,7 +516,8 @@ function runForeground(
         success: false,
         error: `Error executing command: ${err.message}`,
       });
-    });
+    }
+    child.on("error", onError);
   });
 }
 

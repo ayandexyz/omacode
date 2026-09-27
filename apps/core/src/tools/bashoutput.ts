@@ -13,6 +13,7 @@ import type { ToolContext } from "./types.js";
 import type { Tool, ToolExecutionResult, JsonSchema } from "./tool.types.js";
 import { buildTool } from "./factory.js";
 import { peekShellRegistry } from "./shells/index.js";
+import { taskNotificationsEnabled } from "../agent/task-notify.js";
 
 interface BashOutputParams {
   bash_id: string;
@@ -92,9 +93,15 @@ async function executeBashOutput(
   const summary = registry?.get(params.bash_id);
   let body = params.filter ? applyFilter(read.text, params.filter) : read.text;
   if (!body.trim()) {
+    // Said at the moment the model is polling, which is when it listens: a
+    // live run after a move to the background re-polled four times in ten
+    // seconds despite the start message saying not to.
+    const notified = taskNotificationsEnabled(ctx.projectPath ?? ctx.cwd);
     body =
       read.status === "running"
-        ? "(no new output since the last read; still running)"
+        ? notified
+          ? "(no new output since the last read; still running.) You will get a <task-notification> when it exits — stop polling: carry on with other work, or end your turn."
+          : "(no new output since the last read; still running)"
         : "(no new output)";
   }
 

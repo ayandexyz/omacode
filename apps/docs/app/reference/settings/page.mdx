@@ -248,8 +248,8 @@ unvalidated model call. Background:
 
 ## `tasks`
 
-What happens when a background task finishes: today, a sub-agent spawned with
-`agent(run_in_background: true)`.
+What happens when a background task finishes: a sub-agent spawned with
+`agent(run_in_background: true)`, or a background shell exiting.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -261,8 +261,9 @@ What happens when a background task finishes: today, a sub-agent spawned with
 
 Project file first, then `~/.freecode/settings.json`. `FREECODE_TASK_NOTIFY`
 (`1`/`0`) overrides both. Off means no turn is ever started without your input,
-and `run_in_background` runs the sub-agent in the foreground instead, because
-the notification is the only way its result reaches the model. Background:
+and `agent(run_in_background)` runs the sub-agent in the foreground instead,
+because the notification is the only way its result reaches the model. A
+background shell still runs; the model checks it with `bashoutput`. Background:
 [Sub-agents](/guides/subagents#background-notifications).
 
 ## Not in this file

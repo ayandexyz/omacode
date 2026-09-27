@@ -13,7 +13,7 @@
 // =============================================================================
 
 import type { ShellReadResult, ShellStatus, ShellSummary } from "./types.js";
-import { spawnShell } from "./spawn.js";
+import { spawnShell, type SpawnedShell } from "./spawn.js";
 
 /** Per-shell ring-buffer cap. A dev server can log for hours; keep the tail. */
 export const SHELL_BUFFER_CHARS = 256_000;
@@ -83,14 +83,35 @@ export class ShellRegistry {
    * the model reads the error out of `bashoutput` like any other output.
    */
   start(options: ShellStartOptions): ShellSummary {
+    this.assertRoom();
+    return this.attach(options, spawnShell(options.command, options.cwd), "");
+  }
+
+  /**
+   * Take over a process that is already running — a foreground `bash` that
+   * outlived its timeout (tools/bash.ts). `output` is what it printed so far;
+   * the caller must have detached its own listeners first, so every later
+   * chunk lands here once. Throws like `start` when the session is full.
+   */
+  adopt(options: ShellStartOptions, spawned: SpawnedShell, output: string): ShellSummary {
+    this.assertRoom();
+    return this.attach(options, spawned, output);
+  }
+
+  private assertRoom(): void {
     if (this.runningCount() >= MAX_SHELLS_PER_SESSION) {
       throw new Error(
         `Too many background shells (${MAX_SHELLS_PER_SESSION}). Kill one with killbash before starting another.`,
       );
     }
+  }
 
+  private attach(
+    options: ShellStartOptions,
+    { child, killTree }: SpawnedShell,
+    initialOutput: string,
+  ): ShellSummary {
     const id = `bash_${++this.seq}`;
-    const { child, killTree } = spawnShell(options.command, options.cwd);
 
     const shell: Shell = {
       id,
@@ -118,6 +139,7 @@ export class ShellRegistry {
       options.onData?.(id, chunk);
     };
 
+    if (initialOutput) append(initialOutput);
     child.stdout?.on("data", (d: Buffer) => append(d.toString()));
     child.stderr?.on("data", (d: Buffer) => append(d.toString()));
 

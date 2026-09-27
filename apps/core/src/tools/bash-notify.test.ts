@@ -155,3 +155,60 @@ test("a foreground timeout above the cap is capped, and the message says why", a
   );
   assert.equal(quick.success, true, "a huge timeout is clamped, not rejected");
 });
+
+test("a foreground command outliving the default timeout moves to the background, output kept", async () => {
+  const { got, restore } = capture();
+  try {
+    const r = await _executeBash(
+      { command: "echo early-line; sleep 1; echo late-line" },
+      ctx("fg-move"),
+      300,
+    );
+    assert.equal(r.success, true, "not a failure: the command is still running");
+    const out = r.success ? r.result.output : "";
+    assert.equal(r.success && r.result.metadata?.movedToBackground, true);
+    assert.match(out, /early-line/, "what it printed so far is shown");
+    assert.match(out, /moved to the background as bash_\d+ instead of being killed/);
+    assert.match(out, /Do not run it again/);
+    const id = (r.success && r.result.metadata?.shellId) as string;
+    await untilSettled("fg-move", id);
+    assert.equal(got.length, 1, "its exit is reported like any background shell");
+    assert.match(got[0]!.text, /<status>completed<\/status>/);
+    // The registry holds the whole run: the pre-move output and what followed.
+    const all = await BashOutputTool.execute({ bash_id: id }, ctx("fg-move"));
+    const text = all.success ? all.result.output : "";
+    assert.match(text, /early-line/);
+    assert.match(text, /late-line/);
+    assert.equal(text.match(/early-line/g)?.length, 1, "no chunk recorded twice");
+  } finally {
+    restore();
+    disposeShellRegistry("fg-move");
+  }
+});
+
+test("an explicit short timeout still kills — and the model now sees the output and the advice", async () => {
+  const r = await _executeBash(
+    { command: "echo before-kill; sleep 5", timeout: 300 },
+    ctx("fg-kill"),
+  );
+  assert.equal(r.success, false);
+  const error = r.success ? "" : r.error;
+  assert.match(error, /timed out after 300ms \(the timeout you set\) and was killed/);
+  assert.match(error, /before-kill/, "partial output reaches the model");
+  assert.match(error, /run_in_background: true/, "the advice reaches the model");
+  assert.equal(peekShellRegistry("fg-kill")?.list().length ?? 0, 0, "nothing was adopted");
+});
+
+test("polling a still-running shell with nothing new tells the model to stop polling", async () => {
+  try {
+    const { id } = await start("poll-nudge", "sleep 5");
+    const r = await BashOutputTool.execute({ bash_id: id }, ctx("poll-nudge"));
+    assert.match(r.success ? r.result.output : "", /stop polling/);
+    process.env.FREECODE_TASK_NOTIFY = "0";
+    const off = await BashOutputTool.execute({ bash_id: id }, ctx("poll-nudge"));
+    assert.doesNotMatch(off.success ? off.result.output : "", /stop polling/, "no promise it can't keep");
+  } finally {
+    process.env.FREECODE_TASK_NOTIFY = "1";
+    disposeShellRegistry("poll-nudge");
+  }
+});

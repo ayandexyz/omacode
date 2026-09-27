@@ -19,7 +19,7 @@ Dedicated tools cost less context and give more: \`read\` (NOT cat/head/tail/sed
 
 - Non-interactive only: stdin is closed; pass \`-y\`/\`--yes\`/\`--no-input\`.
 - Use \`workdir\` instead of \`cd\` (does not carry over). Quote paths with spaces.
-- \`timeout\` is milliseconds (default 60000, max 600000 = 10 minutes); raise it for builds/tests that take a few minutes.
+- \`timeout\` is milliseconds (default 60000, max 600000 = 10 minutes). A command still running when it expires is moved to the background, not killed — unless you set \`timeout\` below the max yourself, which means "kill it then".
 - Chain dependent steps with \`&&\`; send independent commands as parallel tool calls in one message.
 - Output is capped; the truncation marker names the \`output\` tool call that pages the rest — use it instead of re-running.
 
