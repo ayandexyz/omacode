@@ -22,18 +22,31 @@ along inside model calls that were going to happen anyway.
 GitHub fixed this in Copilot by attaching finished background completions to
 the next already-scheduled request. Their saving: 2.3% of total cost.
 
-## Why FreeCode doesn't have this problem (yet)
+## Why FreeCode doesn't have this problem
 
-By construction. FreeCode has **no background bash and no async subagents** —
-when the model emits several independent tool calls in one response, the
-batching layer (`apps/core/src/tools/batching.ts` +
+When this page was written, FreeCode had **no background bash and no async
+subagents**. When the model emits several independent tool calls in one
+response, the batching layer (`apps/core/src/tools/batching.ts` +
 `tools/orchestrator.ts`) runs them concurrently and returns **all** their
-results in the same single follow-up model call. There is no "check status
-later" turn to eliminate, because nothing runs detached from the loop.
+results in the single follow-up model call. There was no "check status later"
+turn to eliminate.
 
-So the implementation here isn't code — it's the *absence* of the
-anti-pattern, plus the existing batching layer already proving the right
-shape: many results, one request.
+Both now exist, so the rule below is live rather than theoretical:
+
+- **Background sub-agents** (`agent(run_in_background: true)`, 2026-09-27)
+  follow it. A finished one is **pushed**, never polled. If the parent is
+  mid-turn, the `<task-notification>` rides the steering queue into the next
+  model call the turn was already going to make, which is this rule exactly
+  (as a user message rather than a tool result). If the parent is idle, core
+  starts **one** turn, and a burst of completions within 250 ms shares it.
+  That turn is the only call that happens, not an extra one on top of a
+  schedule, so it is not the polling anti-pattern. See
+  [Sub-agents](/guides/subagents#background-notifications).
+- **Background shells** (`bash(run_in_background: true)`, 2026-09-27) follow it
+  the same way: an exit is pushed as a `<task-notification>`, and none is sent
+  when the model already read the finished shell with `bashoutput` — which is
+  the one case that would otherwise buy a redundant turn. See
+  [long-running commands](/guides/tools#long-running-commands).
 
 ## How I implemented it (as a recorded invariant)
 
@@ -55,9 +68,9 @@ background-execution design gets reviewed against this line before it builds.
 
 | Metric | Value |
 | --- | --- |
-| Dedicated polling turns today | 0 — impossible by construction |
+| Dedicated polling turns for sub-agents and shells | 0 — results are pushed |
 | Cost of enforcing the invariant | 0 tokens, 0 code — it's a design rule |
-| Measured saving | n/a until background execution exists; GitHub's 2.3% is the reference point |
+| Measured saving | not measured yet; GitHub's 2.3% is the reference point |
 
 The cheapest technique of the four: it costs nothing because it was adopted
 *before* the feature that would violate it.

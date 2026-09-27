@@ -13,7 +13,7 @@
 // =============================================================================
 
 import type { ShellReadResult, ShellStatus, ShellSummary } from "./types.js";
-import { spawnShell } from "./spawn.js";
+import { spawnShell, type SpawnedShell } from "./spawn.js";
 
 /** Per-shell ring-buffer cap. A dev server can log for hours; keep the tail. */
 export const SHELL_BUFFER_CHARS = 256_000;
@@ -45,6 +45,12 @@ export interface ShellStartOptions {
   onExit?: (id: string, status: ShellStatus, exitCode: number | null) => void;
 }
 
+/** A later subscriber to a running shell — `monitor({ bash_id })`. */
+export interface ShellWatcher {
+  onData: (chunk: string) => void;
+  onExit: (status: ShellStatus, exitCode: number | null) => void;
+}
+
 interface Shell {
   id: string;
   command: string;
@@ -59,9 +65,16 @@ interface Shell {
   droppedChars: number;
   /** Absolute offset the model's `bashoutput` has consumed up to. */
   modelCursor: number;
+  /**
+   * The model already knows how this shell ended: a `bashoutput` returned it
+   * settled, or the model stopped it with `killbash`. A completion
+   * notification would then only buy a redundant turn.
+   */
+  modelKnowsEnd?: boolean;
   kill: (signal: NodeJS.Signals) => void;
   /** Kept on the record so killAll() can fire it too, not just the exit handler. */
   notifyExit?: (id: string, status: ShellStatus, code: number | null) => void;
+  watchers: Set<ShellWatcher>;
   /** Set by kill(): SIGKILL escalation pending; also marks the exit as ours. */
   killTimer?: NodeJS.Timeout;
   closeGrace?: NodeJS.Timeout;
@@ -77,14 +90,35 @@ export class ShellRegistry {
    * the model reads the error out of `bashoutput` like any other output.
    */
   start(options: ShellStartOptions): ShellSummary {
+    this.assertRoom();
+    return this.attach(options, spawnShell(options.command, options.cwd), "");
+  }
+
+  /**
+   * Take over a process that is already running — a foreground `bash` that
+   * outlived its timeout (tools/bash.ts). `output` is what it printed so far;
+   * the caller must have detached its own listeners first, so every later
+   * chunk lands here once. Throws like `start` when the session is full.
+   */
+  adopt(options: ShellStartOptions, spawned: SpawnedShell, output: string): ShellSummary {
+    this.assertRoom();
+    return this.attach(options, spawned, output);
+  }
+
+  private assertRoom(): void {
     if (this.runningCount() >= MAX_SHELLS_PER_SESSION) {
       throw new Error(
         `Too many background shells (${MAX_SHELLS_PER_SESSION}). Kill one with killbash before starting another.`,
       );
     }
+  }
 
+  private attach(
+    options: ShellStartOptions,
+    { child, killTree }: SpawnedShell,
+    initialOutput: string,
+  ): ShellSummary {
     const id = `bash_${++this.seq}`;
-    const { child, killTree } = spawnShell(options.command, options.cwd);
 
     const shell: Shell = {
       id,
@@ -99,6 +133,7 @@ export class ShellRegistry {
       modelCursor: 0,
       kill: killTree,
       notifyExit: options.onExit,
+      watchers: new Set(),
     };
     this.shells.set(id, shell);
 
@@ -110,8 +145,10 @@ export class ShellRegistry {
         shell.droppedChars += drop;
       }
       options.onData?.(id, chunk);
+      for (const w of shell.watchers) w.onData(chunk);
     };
 
+    if (initialOutput) append(initialOutput);
     child.stdout?.on("data", (d: Buffer) => append(d.toString()));
     child.stderr?.on("data", (d: Buffer) => append(d.toString()));
 
@@ -121,6 +158,7 @@ export class ShellRegistry {
       shell.status = status;
       shell.exitCode = code;
       shell.endedAt = Date.now();
+      this.endWatchers(shell);
       options.onExit?.(id, status, code);
     };
 
@@ -152,6 +190,7 @@ export class ShellRegistry {
     if (!shell) return missing();
     const result = this.readFrom(id, shell.modelCursor);
     shell.modelCursor = result.nextCursor;
+    if (result.status !== "running") shell.modelKnowsEnd = true;
     return result;
   }
 
@@ -172,6 +211,39 @@ export class ShellRegistry {
       droppedChars: Math.max(0, shell.droppedChars - cursor),
       nextCursor: end,
     };
+  }
+
+  /**
+   * Whether a completion notification for this shell would tell the model
+   * nothing new: it read the end itself, killed it itself, or the record is
+   * gone (dismissed, or its session ended). Checked at delivery, not at exit —
+   * the model can drain the shell in the moments between.
+   */
+  modelKnowsEnd(id: string): boolean {
+    const shell = this.shells.get(id);
+    return shell ? shell.modelKnowsEnd === true : true;
+  }
+
+  /**
+   * Subscribe to a RUNNING shell's later output and its end. The buffered
+   * output so far is returned rather than replayed, so the caller decides what
+   * to do with it. Undefined for an unknown or settled shell. The returned
+   * `stop` detaches without touching the process.
+   */
+  watch(
+    id: string,
+    watcher: ShellWatcher,
+  ): { buffered: string; stop: () => void } | undefined {
+    const shell = this.shells.get(id);
+    if (!shell || shell.status !== "running") return undefined;
+    shell.watchers.add(watcher);
+    return { buffered: shell.buf, stop: () => shell.watchers.delete(watcher) };
+  }
+
+  /** The last `maxChars` of buffered output, without touching any cursor. */
+  tail(id: string, maxChars: number): string {
+    const buf = this.shells.get(id)?.buf ?? "";
+    return buf.length > maxChars ? buf.slice(-maxChars) : buf;
   }
 
   list(): ShellSummary[] {
@@ -204,9 +276,10 @@ export class ShellRegistry {
    * the exit handler then settles it as `killed`. Returns false for an unknown
    * id, one already settled, or one a kill is already pending on.
    */
-  kill(id: string): boolean {
+  kill(id: string, byModel = false): boolean {
     const shell = this.shells.get(id);
     if (!shell || shell.status !== "running" || shell.killTimer) return false;
+    if (byModel) shell.modelKnowsEnd = true;
     shell.kill("SIGTERM");
     shell.killTimer = setTimeout(() => {
       shell.kill("SIGKILL");
@@ -253,7 +326,14 @@ export class ShellRegistry {
     this.clearTimers(shell);
     shell.status = "killed";
     shell.endedAt = Date.now();
+    this.endWatchers(shell);
     shell.notifyExit?.(shell.id, "killed", null);
+  }
+
+  /** Watchers hear the end first, so their last lines precede the exit notice. */
+  private endWatchers(shell: Shell): void {
+    for (const w of shell.watchers) w.onExit(shell.status, shell.exitCode);
+    shell.watchers.clear();
   }
 
   private clearTimers(shell: Shell): void {

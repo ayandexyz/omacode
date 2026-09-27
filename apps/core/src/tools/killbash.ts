@@ -63,7 +63,7 @@ async function executeKillBash(
     };
   }
 
-  const killed = registry.kill(params.bash_id);
+  const killed = registry.kill(params.bash_id, true);
   return {
     success: true,
     result: {

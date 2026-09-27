@@ -1,19 +1,314 @@
 ---
 title: "Sub-agents"
-description: "Delegating subtasks to isolated nested agent loops."
+description: "Delegating work to nested agent loops — foreground or background, read-only or writing, fresh or forked."
 ---
 
 # Sub-agents
 
-The `agent` tool spawns a fresh agent loop with its own session id, tool set, and
-iteration budget, fully isolated from the parent's history. Read-only roles run in
-`explore` mode and write-capable roles in `build` mode; only the final result
-comes back to the parent turn.
+The `agent` tool spawns a second agent loop with its own session, its own
+context window and its own iteration budget. Only its final summary comes back
+to the agent that spawned it, so a sweep that reads forty files costs the
+parent one tool result instead of forty.
 
-## On this page (coming soon)
+A sub-agent can run in the **foreground**, where the parent waits for it, or in
+the **background**, where the parent keeps working and gets the result later as
+a notification. You can watch either kind live with `/agents`.
 
-- The four roles: explorer, reviewer, tester, summarizer
-- Why isolation keeps the parent's context small
-- Iteration budgets and capability profiles
-- Watching progress via `subagentStarted` / `subagentCompleted`
-- When delegation helps and when it just costs tokens
+## Quick start
+
+You rarely need to ask. The model decides when to delegate (see
+[Who decides](#who-decides)). To force it:
+
+```text
+Use a sub-agent to find every caller of runSessionTurn and report them.
+Spawn a background sub-agent to summarize apps/core/src/agent/registry/ — don't wait for it.
+```
+
+Then type `/agents`, pick the row, press **Enter**, and watch.
+
+## The kinds, and what makes each one different
+
+Every sub-agent is a combination of three independent choices, all of them
+arguments to the `agent` tool:
+
+| Choice | Default | Other value |
+| --- | --- | --- |
+| **When the parent gets the result** | foreground: the tool call blocks until the sub-agent finishes | `run_in_background: true`: returns at once, the result arrives as a `<task-notification>` |
+| **What it may change** | read-only: runs in `explore` mode | `readOnly: false`: inherits the parent's mode |
+| **What it starts with** | fresh: only the `prompt` | `forkContext: true`: a copy of the parent's whole conversation |
+
+### Foreground (default)
+
+- The parent's turn **waits**. The tool result is the sub-agent's summary,
+  status, turn count and, on failure, the reason.
+- Use it when the next step depends on the answer.
+- In `/agents` the header reads `Subagent: <task>`.
+
+### Background (`run_in_background: true`)
+
+- The tool returns immediately with an id (`Started in the background as
+  subagent-…`). The parent carries on, or ends its turn.
+- When the sub-agent finishes, the parent gets a `<task-notification>` with its
+  id, status (`completed`, `failed` or `killed`), task and result, and you see
+  a one-line notice: `Background agent completed: <task>`.
+- Use it for long work the next step doesn't depend on, or to run several
+  sub-agents in parallel.
+- In `/agents` the header reads `Background subagent: <task>`.
+- How the result is delivered is described under
+  [Background notifications](#background-notifications).
+
+### Read-only (default)
+
+- Runs in `explore` mode. `write`, `edit` and `bash` are **removed from its tool
+  list**, not just refused, so it cannot change anything even if it tries. It
+  never prompts you.
+- Right for investigation: "where is X wired up", "why is this test flaky",
+  "summarize this directory".
+
+### Writing (`readOnly: false`)
+
+- Inherits the **parent's** mode rather than a fixed `build`. Under a `danger`
+  parent it does not prompt; under `build` its permission prompts reach you
+  like the parent's own, with the sub-agent as the asker.
+- The model is told to use this only when the task is to change code.
+
+### Fresh context (default)
+
+- Starts with nothing but the `prompt`. The tool description tells the model to
+  put everything the sub-agent needs into that prompt and to say exactly what
+  it wants back.
+- Cheapest, and the default for a reason: the whole point is not carrying the
+  parent's context.
+
+### Forked context (`forkContext: true`)
+
+- The sub-agent's session is a fork of the parent's, so it starts with the full
+  conversation.
+- Use it when the task is "continue this work" rather than an isolated
+  question. It costs a full re-send of the parent's history on its first call.
+
+### The verifier: the one the harness spawns itself
+
+Separate from the `agent` tool, the loop runs an **adversarial verifier** on its
+own when a run has edited or written **3 or more files**. When the model says
+it's done, a read-only sub-agent reviews the changed files against the original
+request and returns `PASS`, `FAIL` or `PARTIAL`. A `FAIL` sends the main agent
+back to fix the problem, at most twice per run. The verifier appears in
+`/agents` as `Verify changes`. The model does not choose this one.
+
+### Sub-agent types (`subagent_type`)
+
+A **type** is a named role: its own instructions, optionally a narrower tool
+set, a model, and whether it may edit. The model picks one with
+`subagent_type`; without one it gets `general`, which is what every sub-agent
+was before types existed. Every session's system prompt lists the available
+types, one line each.
+
+Three are built in:
+
+| Type | What it is |
+| --- | --- |
+| `general` | Any self-contained task. Read-only unless the call passes `readOnly: false`. |
+| `explorer` | Read-only reconnaissance: entry points, flows, constraints. Only `read`, `ls`, `glob`, `grep`, `lsp`. |
+| `reviewer` | Read-only review for bugs, security issues and needless complexity. Same tools as `explorer`. |
+
+Add your own as markdown files. The format is Claude Code's, so a
+`.claude/agents/*.md` you already have works as is:
+
+```markdown
+---
+name: security-auditor
+description: Read-only audit for injection, path traversal and unsafe input handling.
+tools: Read, Grep, Glob        # optional; omitted = everything its mode allows
+model: inherit                 # optional: inherit, or provider/model
+mode: explore                  # optional, FreeCode only: explore (read-only) or build
+---
+You are security-auditor. Report each risk with its path and line and a
+concrete input that triggers it. Do not edit anything.
+```
+
+Where they are read from, later winning on a name clash:
+
+1. built-in
+2. `~/.claude/agents/`
+3. `~/.freecode/agents/`
+4. `<project>/.claude/agents/`
+5. `<project>/.freecode/agents/`
+
+`FREECODE_CLAUDE_CODE_AGENTS=0` skips both `.claude` directories. Run
+`freecode agents list` to see what a project resolves to, which file each
+type came from, and what a later scope shadowed.
+
+How a file is applied:
+
+- **`tools` narrows, never widens.** It is intersected with what the
+  sub-agent's mode allows, so a read-only type listing `Bash` still cannot run
+  it. A call to a tool outside the list is refused. Claude Code's capitalised
+  names (`Read`, `Grep`) are understood; names FreeCode has no tool for are
+  dropped, and a file with none left is skipped.
+- **`mode`:** without it, a file whose `tools` include `Write`, `Edit` or `Bash`
+  is `build` and anything else is `explore`. `build` behaves like
+  `readOnly: false`, including inheriting the parent's permission mode. An
+  explicit `readOnly` on the call beats the file.
+- **`model`:** Claude Code's aliases (`sonnet`, `opus`, `haiku`) mean inherit.
+  An unknown provider is an error, not a silent fallback.
+- **The body** is added to the sub-agent's system prompt under
+  `# Your role: <name>`. Project instructions (`CLAUDE.md`, `AGENTS.md`) still
+  apply.
+- **Bad files are skipped** with one warning: missing `name`/`description`, an
+  invalid name, or an unknown `mode`.
+- **An unknown `subagent_type` is an error** that lists the valid names.
+
+Project type files load without a trust step, as in Claude Code: they can only
+shape a prompt and narrow tools, never run code or widen permissions.
+
+## Who decides
+
+**The model decides, from the tool description.** Nothing in the harness picks
+foreground or background, read-only or writing, for it. What the model is told:
+
+- Delegate work that would burn context it has no further use for. Don't
+  delegate a known read, a single grep or an understood edit: those are faster
+  inline.
+- Put everything into `prompt`, because the sub-agent starts cold unless
+  forked.
+- Pick a `subagent_type` from the listed types when one fits.
+- It is read-only by default. When the task is to change code it **must** pass
+  `readOnly: false`, or the sub-agent can't do it.
+- It cannot spawn sub-agents of its own.
+- Its result is not shown to the user, so relay what matters.
+- To run several in parallel, make the calls in one response: read-only
+  sub-agents run at the same time. A writing one always runs alone.
+- Use `run_in_background: true` for long work it doesn't need before its next
+  step.
+
+**You can always override** by saying so in your message ("use a background
+sub-agent", "don't delegate this"). The only sub-agent the harness spawns
+without asking is the [verifier](#the-verifier-the-one-the-harness-spawns-itself).
+
+## Background notifications
+
+A finished background sub-agent always reaches the agent that spawned it.
+Delivery depends on what that agent is doing at the time:
+
+| Parent is… | What happens |
+| --- | --- |
+| **mid-turn** | The notification rides the steering path: it becomes the next user message at the next tool-batch boundary, inside the turn already running. No extra turn. |
+| **idle** | Core starts a turn with the notification as its prompt, so the agent reports back without you typing anything. It behaves like a turn you started: spinner, Ctrl+C/Esc stops it, Enter steers into it. |
+| **gone** (session ended, core restarted) | Dropped. There is nobody to tell. |
+
+Several finishing within 250 ms of each other become **one** turn, not one per
+agent. The notification is stored in the session as a `synthetic:
+"task_notification"` user message. When you resume the session it renders as
+the line *"A background task finished and was reported to the agent."* rather
+than as XML.
+
+An idle turn is a **paid model call with no input from you**. Notifications are
+on by default, the way Claude Code behaves. To turn them off:
+
+```json
+// ~/.freecode/settings.json  or  <project>/.freecode/settings.json
+{ "tasks": { "notify": false } }
+```
+
+or `FREECODE_TASK_NOTIFY=0` (which beats both files). With notifications off,
+`run_in_background: true` **runs in the foreground instead**, and the result
+says so. The notification is the only way a background result reaches the
+model, so there is no background mode without it.
+
+## Redirecting or stopping a running one
+
+The agent that spawned a background sub-agent can still steer it:
+
+| Tool | What it does |
+| --- | --- |
+| `agent_send(agent_id, message)` | Delivers the message to the sub-agent after its current step, as if you had steered it. Use it for "change of plan: only look at `src/api`". |
+| `agent_stop(agent_id)` | Stops it and returns its last activity (up to 2,000 characters). No notification follows, because the parent asked for the stop. |
+
+Only the direct parent can use them on a given sub-agent; a sub-agent cannot
+reach its parent or a sibling. Both answer with a plain message, not an error,
+for an agent that has already finished or was never theirs. If a message
+arrives too late for the sub-agent to read it, its result says so and repeats
+the message instead of dropping it.
+
+## Continuing a finished one
+
+A follow-up about a finished sub-agent's findings does not have to start from
+scratch. `agent({ continue: "<its id>", task, prompt })` runs a new sub-agent
+that starts with the finished one's whole conversation, then your new prompt:
+
+- It has **a new id**. Every sub-agent's result starts with an `Agent id:`
+  line, which is what `continue` takes; a continuation's adds
+  `(continued from <old id>)`. The continuation can itself be continued.
+- It runs as **the same type, mode and model** as the original. Passing
+  `subagent_type`, `model`, `readOnly` or `forkContext` with `continue` is an
+  error: changing any of them mid-history would be a different agent. Start a
+  new one instead.
+- `run_in_background` works as usual.
+- It is refused for an agent that is **still running** (use `agent_send`), one
+  **the parent stopped with `agent_stop`**, one it did not start, and the
+  verifier. An agent you stopped from `/agents` can be continued.
+- The original is looked up in the running core's roster, so continuing only
+  works until the session ends or core restarts, even though the old
+  sub-agent's session is still on disk.
+
+## Watching them: `/agents`
+
+`/agents` is a roster of every sub-agent under the current session, oldest
+first, with status and elapsed time.
+
+| Key | In the roster | In the viewer |
+| --- | --- | --- |
+| ↑ / ↓ | select | scroll one row |
+| Enter | open the viewer | — |
+| PgUp / PgDn | — | scroll a page |
+| End / `G` | — | follow the tail again |
+| `k` | stop the selected running agent | stop this agent |
+| `d` | dismiss a finished agent | — |
+| Esc / `q` | close | back to the main conversation |
+
+The viewer **replaces** the main transcript rather than covering it, and draws
+the sub-agent with the same renderer as the main agent: tool cards, thinking
+blocks and streaming text look identical. Its first message is the **full
+prompt the parent sent**, shown as a user message. It comes from the roster
+record, not the activity buffer, so it survives the buffer dropping old
+activity.
+
+Opening a viewer mid-run replays what the sub-agent has done so far from core's
+buffer (64K characters per agent), then follows live.
+
+## Limits
+
+| Limit | Value | What happens past it |
+| --- | --- | --- |
+| Nesting depth | 1: a sub-agent cannot spawn sub-agents | tool error telling the model to do the work itself |
+| Running per session | 8 | tool error: wait for one to finish |
+| Iterations | 50 for the `agent` tool, 15 for the verifier | the sub-agent stops and reports |
+| Provider | the parent session's provider and model | `model` (`provider` or `provider/model`), or the type's `model:`; an unknown provider is an error. The old `agentType` is still accepted: a type name or a registered provider, and anything else is ignored as before |
+
+A stopped (`k`) sub-agent reports `killed` to its parent, whether foreground or
+background. When a session ends, its sub-agents are stopped and forgotten. A
+background shell a sub-agent started dies with that sub-agent.
+
+## Known gaps
+
+- **Results do not survive a core restart.** A background sub-agent running
+  when core exits is stopped. It is no longer silent: on resume you get a
+  notice, and the agent is told on your next message (see
+  [long-running commands](/guides/tools#long-running-commands)).
+- **The named roles are mostly unused.** `agent/types.ts` defines `explorer`,
+  `reviewer`, `tester`, `summarizer` and `verifier`, but only `verifier` is
+  wired (the verify gate). The `agent` tool has no role argument; the
+  read-only/writing choice is `readOnly`.
+
+## Where it lives
+
+| Piece | File |
+| --- | --- |
+| The `agent` tool, foreground and background | `apps/core/src/tools/agent.ts` |
+| Notification text + on/off switch | `apps/core/src/agent/task-notify.ts` |
+| Delivery (steer mid-turn, start a turn when idle, 250 ms coalesce) | `apps/core/src/server.ts` |
+| Steering queue the notification rides | `AgentLoop.steer()` / `drainSteers()` in `apps/core/src/agent/loop.ts` |
+| Roster, depth and concurrency caps | `apps/core/src/agent/registry/` |
+| The verifier and the role definitions | `apps/core/src/agent/subagent.ts`, `agent/types.ts` |
+| `/agents` roster and viewer | `apps/tui/src/components/agents-panel.ts`, `agent-viewer.ts` |

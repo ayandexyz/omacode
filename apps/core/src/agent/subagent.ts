@@ -83,6 +83,7 @@ export async function executeSubagent(
         id,
         parentId: parentSessionId,
         task: config.type === "verifier" ? "Verify changes" : config.taskPrompt,
+        prompt: config.taskPrompt,
         agentType: config.type,
         onActivity: (agentId, chunk) =>
           BusEvents.stream(rootId, {

@@ -17,6 +17,11 @@ const PAD_X = 2;
 /** Top border, hint, bottom border. */
 const CHROME_ROWS = 3;
 const MIN_INNER_WIDTH = 32;
+/**
+ * The type every spawn without `subagent_type` gets. Left off the row: naming
+ * it on nearly every line would bury the rows that picked a role.
+ */
+const DEFAULT_TYPE = "general";
 
 export interface AgentsPanelCallbacks {
   /**
@@ -45,9 +50,10 @@ function elapsed(agent: AgentSummary): string {
  */
 function statusCell(agent: AgentSummary): string {
   const text = `${agent.status === "completed" ? "done" : agent.status} ${elapsed(agent)}`;
-  return agent.status === "running"
-    ? accent(text)
-    : dim(text);
+  const status = agent.status === "running" ? accent(text) : dim(text);
+  return agent.agentType === DEFAULT_TYPE
+    ? status
+    : `${dim(agent.agentType + " ·")} ${status}`;
 }
 
 /**

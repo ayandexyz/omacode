@@ -14,17 +14,34 @@ import type { HookRuntime } from "../hooks/runtime.js";
 import { createSessionStore, type SessionStore } from "../session/store.js";
 import { coerceBoolean } from "./coerce-args.js";
 import { createRecorder } from "../rollout/recorder.js";
-import { listProviders } from "../providers/registry.js";
+import { resolveSpawn } from "../agent/definitions/resolve.js";
+import { resolveContinuation } from "./agent-continue.js";
 import { getAgentRegistry } from "../agent/registry/index.js";
 import { disposeSubagentShells } from "./shells/index.js";
+import { notifyTask, taskNotificationsEnabled } from "../agent/task-notify.js";
+import { recordEnd, recordStart } from "../agent/background-ledger.js";
 
 interface AgentParams {
   task: string;
   prompt: string;
+  /** A definition name (agent/definitions); default `general`. */
+  subagent_type?: string;
+  /** `provider` or `provider/model`; default the parent's. */
+  model?: string;
+  /** Deprecated alias for `model` (or a definition name); not in the schema. */
   agentType?: string;
   forkContext?: boolean;
   readOnly?: boolean;
+  /** Id of a finished sub-agent this caller started: run its next assignment. */
+  continue?: string;
+  run_in_background?: boolean;
 }
+
+type AgentResult = ToolExecutionResult<{
+  title: string;
+  output: string;
+  metadata?: Record<string, unknown>;
+}>;
 
 // =============================================================================
 // Agent Schema
@@ -41,9 +58,15 @@ const agentSchema: JsonSchema = {
       type: "string",
       description: "The actual prompt/instruction for the sub-agent",
     },
-    agentType: {
+    subagent_type: {
       type: "string",
-      description: "Optional: AI provider to use (e.g., 'chatgpt', 'claude')",
+      description:
+        "Optional: which kind of sub-agent to run — one of the names under 'Sub-agent types' in your instructions. Default general.",
+    },
+    model: {
+      type: "string",
+      description:
+        "Optional: run it on another model, as provider or provider/model (e.g. anthropic/claude-opus-5). Default: this session's model.",
     },
     forkContext: {
       type: "boolean",
@@ -53,7 +76,17 @@ const agentSchema: JsonSchema = {
     readOnly: {
       type: "boolean",
       description:
-        "Defaults to true: the sub-agent runs read-only and physically cannot see write/edit/bash, so it cannot change anything. Set false ONLY when the task is to modify code — the sub-agent then inherits this session's permission mode.",
+        "Defaults to true: the sub-agent runs read-only and physically cannot see write/edit/bash, so it cannot change anything. If the task is to write or edit files you MUST set false, or the sub-agent cannot do it — it then inherits this session's permission mode.",
+    },
+    continue: {
+      type: "string",
+      description:
+        "Optional: the id of a finished sub-agent you started. It picks up with its full history plus this prompt, as the same type on the same model — for a follow-up about its findings instead of starting over. Not with subagent_type, model, readOnly or forkContext.",
+    },
+    run_in_background: {
+      type: "boolean",
+      description:
+        "If true, return immediately and keep working (or end your turn) while the sub-agent runs. Its result arrives later as a <task-notification> message — do not poll or wait for it. Not needed for parallelism: read-only agent calls made in one response already run at the same time.",
     },
   },
   required: ["task", "prompt"],
@@ -82,8 +115,19 @@ function validateAgentInput(
   ) {
     return { valid: false, error: "forkContext must be a boolean" };
   }
+  for (const key of ["subagent_type", "model", "agentType", "continue"]) {
+    if (p[key] !== undefined && typeof p[key] !== "string") {
+      return { valid: false, error: `${key} must be a string` };
+    }
+  }
   if (p.readOnly !== undefined && coerceBoolean(p.readOnly) === undefined) {
     return { valid: false, error: "readOnly must be a boolean" };
+  }
+  if (
+    p.run_in_background !== undefined &&
+    coerceBoolean(p.run_in_background) === undefined
+  ) {
+    return { valid: false, error: "run_in_background must be a boolean" };
   }
   return { valid: true };
 }
@@ -96,13 +140,7 @@ async function executeSubagent(
   params: AgentParams,
   ctx: ToolContext,
   hooks: HookRuntime,
-): Promise<
-  ToolExecutionResult<{
-    title: string;
-    output: string;
-    metadata?: Record<string, unknown>;
-  }>
-> {
+): Promise<AgentResult> {
   let subagentId = `subagent-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const parentSessionId = ctx.sessionId || "unknown";
   const parentRecorder = ctx.sessionId
@@ -120,24 +158,61 @@ async function executeSubagent(
     return { success: false, error: String((error as Error).message ?? error) };
   }
 
+  // Definition and model next, still before anything exists on disk: an
+  // unknown name is a readable refusal, not a session left behind. A
+  // continuation takes all of it from the agent it continues.
+  const continued = params.continue
+    ? resolveContinuation(params as unknown as Record<string, unknown>, ctx.sessionId, agents)
+    : undefined;
+  if (continued && "error" in continued) return { success: false, error: continued.error };
+  const spawn = continued
+    ? {
+        agentLabel: continued.config.definition,
+        provider: continued.config.provider as string | undefined,
+        model: continued.config.model,
+        readOnly: continued.config.readOnly as boolean | undefined,
+        role: continued.config.role,
+      }
+    : (() => {
+        const r = resolveSpawn(params, ctx.projectPath ?? ctx.cwd);
+        if ("error" in r) return r;
+        return {
+          agentLabel: r.definition.name,
+          provider: r.provider,
+          model: r.model,
+          // An explicit readOnly wins; otherwise the definition's mode decides.
+          readOnly: coerceBoolean(params.readOnly) ?? r.definition.mode === "explore",
+          role: r.role,
+        };
+      })();
+  if ("error" in spawn) return { success: false, error: spawn.error };
+  const agentLabel = spawn.agentLabel;
+
   const baseDir = path.join(os.homedir(), ".freecode");
   sessionStore = await createSessionStore(baseDir);
-  const forking = coerceBoolean(params.forkContext) && !!ctx.sessionId;
-  if (forking) {
-    subagentId = await sessionStore.fork(ctx.sessionId!);
+  // A continuation forks the finished agent's session; forkContext forks the
+  // parent's. Either way the new id holds the history.
+  const forkFrom = continued
+    ? continued.sourceId
+    : coerceBoolean(params.forkContext) && ctx.sessionId
+      ? ctx.sessionId
+      : undefined;
+  const forking = !!forkFrom;
+  if (forkFrom) {
+    subagentId = await sessionStore.fork(forkFrom);
   }
 
-  // `agentType` is documented as an optional provider override, not a real
-  // "agent type" — but the registry only knows anthropic/openai/gemini/
-  // minimax/deepseek/zai, so an unset or bogus value used to default to the
-  // unregistered "chatgpt" and throw on the subagent's first turn (known gap
-  // #6). Fall back to the parent session's own provider/model instead.
-  const registeredIds = new Set(listProviders().map((p) => p.id));
-  let provider =
-    params.agentType && registeredIds.has(params.agentType)
-      ? params.agentType
-      : undefined;
-  let model: string | undefined;
+  // An explicit model (the call's, the definition's, or the continued
+  // agent's) was validated already. Otherwise inherit the parent's.
+  let provider = spawn.provider;
+  let model = spawn.model;
+  // The parent run's own model first: session meta usually has none (the
+  // model is chosen per turn), and the provider's default then silently
+  // stood in — a MiniMax-M3 session delegated to MiniMax-M2.
+  if (!provider && ctx.provider) {
+    provider = ctx.provider;
+    model = ctx.model;
+  }
   if (!provider && ctx.sessionId) {
     const parentMeta = await sessionStore.getMeta(
       ctx.sessionId,
@@ -154,7 +229,7 @@ async function executeSubagent(
     if (forking) await discardSession();
     return {
       success: false,
-      error: `agent: no valid provider (agentType "${params.agentType ?? ""}" is not registered, and the parent session has none)`,
+      error: "agent: no provider — none was given, and the parent session has none",
     };
   }
 
@@ -181,6 +256,13 @@ async function executeSubagent(
     toolName: "agent",
   };
 
+  // Background needs a parent session to notify, and notifications switched
+  // on: the notification is the only way a background result reaches the
+  // model. With them off it runs in the foreground and says so.
+  const wantsBackground = coerceBoolean(params.run_in_background) === true;
+  const background =
+    wantsBackground && !!ctx.sessionId && taskNotificationsEnabled(projectPath);
+
   // Register BEFORE anything is constructed: the depth and concurrency caps
   // have to be able to refuse the spawn, and the registry is what knows how
   // deep in the tree this parent already is. A refusal is a tool error the
@@ -191,7 +273,9 @@ async function executeSubagent(
       id: subagentId,
       parentId: parentSessionId,
       task: params.task,
-      agentType: params.agentType || "agent",
+      prompt: params.prompt,
+      background,
+      agentType: agentLabel,
       // Stamped with the ROOT session id: the frontend subscribes to the root
       // and would never see an event addressed to the subagent's own id.
       onActivity: (id, chunk) =>
@@ -208,7 +292,13 @@ async function executeSubagent(
   // `k` in the /agents panel settles the record to "killed" before the loop
   // exists (stop() fires the interrupt on attach), so the loop's own result
   // cannot be trusted to say so — the record is the source of truth.
-  const killed = () => agents.get(subagentId)?.status === "killed";
+  // A missing record counts too: session end and daemon shutdown dispose the
+  // roster (stop, then forget), and a running record is removed no other way.
+  // Reading "gone" as "not killed" reported a shutdown as `completed`.
+  const killed = () => {
+    const record = agents.get(subagentId);
+    return !record || record.status === "killed";
+  };
 
   // Read-only unless the spawner opts out. `explore` is not advisory: mutating
   // tools are filtered out of the tool list entirely (tools/defs-cache.ts), so
@@ -218,7 +308,16 @@ async function executeSubagent(
   // hardcoding `build` — under a `danger` parent that used to mean the
   // subagent prompted for permissions the user had already switched off, and
   // the prompt surfaced mid-turn with nothing saying which agent asked.
-  const readOnly = coerceBoolean(params.readOnly) ?? true;
+  const readOnly = spawn.readOnly ?? true;
+  // Kept so `agent({ continue })` can run this agent's next generation the
+  // same way.
+  agents.setSpawnConfig(subagentId, {
+    definition: agentLabel,
+    readOnly,
+    provider,
+    model,
+    role: spawn.role,
+  });
   const subagentMode: AgentMode = readOnly
     ? "explore"
     : (ctx.agentMode ?? "build");
@@ -230,137 +329,215 @@ async function executeSubagent(
     agentId: subagentId,
     parentId: parentSessionId,
     task: params.task,
-    agentType: params.agentType || "agent",
+    agentType: agentLabel,
     depth: agents.depthOf(subagentId),
   });
 
-  try {
-    const startResult = await hooks.runSubagentStart(params.task, hookCtx);
+  const runToCompletion = async (): Promise<AgentResult> => {
+    try {
+      const startResult = await hooks.runSubagentStart(params.task, hookCtx);
 
-    if (startResult.additionalContext) {
-      console.log(`[AgentTool] SubagentStart hook added context`);
-    }
-    // Stopped from the panel while the hook ran: nothing to run.
-    if (killed()) throw new Error("interrupted");
+      if (startResult.additionalContext) {
+        console.log(`[AgentTool] SubagentStart hook added context`);
+      }
+      // Stopped from the panel while the hook ran: nothing to run.
+      if (killed()) throw new Error("interrupted");
 
-    BusEvents.subagentStarted(
-      subagentId,
-      params.agentType || "agent",
-      parentSessionId,
-      params.task,
-    );
-    parentRecorder?.recordSubagentStart(subagentId, params.task);
-
-    const subAgentLoop = new AgentLoop(subagentId, {
-      maxIterations: 50,
-      hooks,
-      sessionStore,
-      // Delegated machine work, nothing durable to learn from it — same
-      // reasoning as agent/subagent.ts.
-      memoryExtraction: false,
-      redirect: false,
-      autoPoke: false,
-      cacheWarming: false,
-      // A subagent's edits belong to the parent turn, which is already
-      // checkpointed; snapshotting again would add a tree per delegation.
-      checkpoints: false,
-    });
-    // Late-bound because the loop cannot exist until the spawn has been
-    // allowed; this is what makes `k` in the /agents panel able to stop it.
-    agents.attachInterrupt(subagentId, () => subAgentLoop.interrupt());
-
-    const result = await subAgentLoop.run({
-      prompt: params.prompt,
-      sessionId: subagentId,
-      provider,
-      model,
-      projectPath,
-      agentMode: subagentMode,
-    });
-
-    // The loop reports its own interrupt as a clean completion (that is the
-    // right answer for a user's Ctrl+C at the top level); a killed subagent
-    // is a failure to the parent that delegated to it.
-    const interrupted = killed();
-    const success = result.success && !interrupted;
-    const message = interrupted ? "interrupted" : result.message;
-
-    BusEvents.subagentCompleted(
-      subagentId,
-      params.agentType || "agent",
-      parentSessionId,
-      success,
-      message,
-    );
-    parentRecorder?.recordSubagentStop(subagentId, message ?? "");
-    settleStatus = success ? "completed" : "failed";
-
-    await hooks.runSubagentStop(params.task, hookCtx);
-
-    // A failure has to carry its reason. Without this the model is handed a
-    // bare "Status: FAILED" and can only guess — which is exactly what it did
-    // when the missing-session ENOENT above was still live.
-    if (!success) {
-      console.error(
-        `[agent] Subagent ${subagentId} returned failure: ${message ?? "(no message)"}`,
+      BusEvents.subagentStarted(
+        subagentId,
+        agentLabel,
+        parentSessionId,
+        params.task,
       );
-    }
-    const output = [
-      `Subagent: ${params.task}`,
-      `Status: ${success ? "SUCCESS" : "FAILED"}`,
-      `Turns: ${result.turnCount}`,
-      `Iterations: ${result.iterationCount}`,
-      !success && message ? `Reason: ${message}` : "",
-      result.content ? `\nOutput:\n${result.content}` : "",
-    ]
-      .filter(Boolean)
-      .join("\n");
+      parentRecorder?.recordSubagentStart(subagentId, params.task);
 
-    return {
-      success: true,
-      result: {
-        title: `Agent: ${params.task}`,
-        output,
-        metadata: {
-          subagentId,
-          success,
-          turns: result.turnCount,
+      const subAgentLoop = new AgentLoop(subagentId, {
+        maxIterations: 50,
+        hooks,
+        sessionStore,
+        // Delegated machine work, nothing durable to learn from it — same
+        // reasoning as agent/subagent.ts.
+        memoryExtraction: false,
+        redirect: false,
+        autoPoke: false,
+        cacheWarming: false,
+        // A subagent's edits belong to the parent turn, which is already
+        // checkpointed; snapshotting again would add a tree per delegation.
+        checkpoints: false,
+      });
+      // Late-bound because the loop cannot exist until the spawn has been
+      // allowed; this is what makes `k` in the /agents panel able to stop it.
+      agents.attachInterrupt(subagentId, () => subAgentLoop.interrupt());
+      // `agent_send` from the parent lands between tool batches, like a user's
+      // steer at the top level. Framed so the subagent knows who is talking.
+      agents.attachSteer(subagentId, (text) =>
+        subAgentLoop.steer(`Message from the agent that started you:\n${text}`),
+      );
+
+      const result = await subAgentLoop.run({
+        prompt: params.prompt,
+        sessionId: subagentId,
+        provider,
+        model,
+        projectPath,
+        agentMode: subagentMode,
+        role: spawn.role,
+      });
+
+      // The loop reports its own interrupt as a clean completion (that is the
+      // right answer for a user's Ctrl+C at the top level); a killed subagent
+      // is a failure to the parent that delegated to it.
+      const interrupted = killed();
+      const success = result.success && !interrupted;
+      // A message the parent sent that the agent never read: it finished (or
+      // was stopped) before its next steer point. Said, not dropped.
+      const undelivered = [
+        ...subAgentLoop
+          .takeUndeliveredSteers()
+          .filter((s) => s.synthetic === "steer")
+          .map((s) => s.text.replace(/^Message from the agent that started you:\n/, "")),
+        ...agents.takeUndelivered(subagentId),
+      ];
+      const message = interrupted ? "interrupted" : result.message;
+
+      BusEvents.subagentCompleted(
+        subagentId,
+        agentLabel,
+        parentSessionId,
+        success,
+        message,
+      );
+      parentRecorder?.recordSubagentStop(subagentId, message ?? "");
+      settleStatus = success ? "completed" : "failed";
+
+      await hooks.runSubagentStop(params.task, hookCtx);
+
+      // A failure has to carry its reason. Without this the model is handed a
+      // bare "Status: FAILED" and can only guess — which is exactly what it did
+      // when the missing-session ENOENT above was still live.
+      if (!success) {
+        console.error(
+          `[agent] Subagent ${subagentId} returned failure: ${message ?? "(no message)"}`,
+        );
+      }
+      const output = [
+        `Subagent: ${params.task}`,
+        // The id has to be in the text: metadata never reaches the model, and
+        // without it `continue` got the type name instead (delegation eval).
+        `Agent id: ${subagentId}${continued ? ` (continued from ${continued.sourceId})` : ""}`,
+        `Status: ${success ? "SUCCESS" : "FAILED"}`,
+        `Turns: ${result.turnCount}`,
+        `Iterations: ${result.iterationCount}`,
+        !success && message ? `Reason: ${message}` : "",
+        result.content ? `\nOutput:\n${result.content}` : "",
+        undelivered.length
+          ? `\n${undelivered.length} message(s) you sent with agent_send were not delivered — it finished first:\n${undelivered.map((t) => `- ${t}`).join("\n")}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      return {
+        success: true,
+        result: {
+          title: `Agent: ${params.task}`,
+          output,
+          metadata: {
+            subagentId,
+            ...(continued ? { continuedFrom: continued.sourceId } : {}),
+            success,
+            turns: result.turnCount,
+          },
         },
-      },
-    };
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    console.error(`[agent] Subagent ${subagentId} failed: ${errorMsg}`);
-    settleStatus = "failed";
+      };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`[agent] Subagent ${subagentId} failed: ${errorMsg}`);
+      settleStatus = "failed";
 
-    BusEvents.subagentCompleted(
-      subagentId,
-      params.agentType || "agent",
-      parentSessionId,
-      false,
-      errorMsg,
-    );
-    parentRecorder?.recordSubagentStop(subagentId, errorMsg);
+      BusEvents.subagentCompleted(
+        subagentId,
+        agentLabel,
+        parentSessionId,
+        false,
+        errorMsg,
+      );
+      parentRecorder?.recordSubagentStop(subagentId, errorMsg);
 
-    await hooks.runSubagentStop(
-      JSON.stringify({ success: false, error: errorMsg }),
-      hookCtx,
-    );
+      await hooks.runSubagentStop(
+        JSON.stringify({ success: false, error: errorMsg }),
+        hookCtx,
+      );
 
-    return {
-      success: false,
-      error: errorMsg,
-    };
-  } finally {
-    // Idempotent, and a no-op when the panel already stopped this agent —
-    // `stop()` settles the record itself so the row flips without waiting for
-    // the loop to unwind.
-    agents.settle(subagentId, settleStatus);
-    // A subagent runs under a synthetic session id that `endSession` never
-    // sees, so a background shell it started would otherwise outlive it. Its
-    // shells live in the root's registry, so take only its own.
-    disposeSubagentShells(subagentId);
+      return {
+        success: false,
+        error: errorMsg,
+      };
+    } finally {
+      // Idempotent, and a no-op when the panel already stopped this agent —
+      // `stop()` settles the record itself so the row flips without waiting for
+      // the loop to unwind.
+      agents.settle(subagentId, settleStatus);
+      // A subagent runs under a synthetic session id that `endSession` never
+      // sees, so a background shell it started would otherwise outlive it. Its
+      // shells live in the root's registry, so take only its own.
+      disposeSubagentShells(subagentId);
+    }
+  };
+
+  if (!background) {
+    const result = await runToCompletion();
+    if (wantsBackground && result.success) {
+      result.result.output +=
+        "\n\n(Ran in the foreground: task notifications are off — tasks.notify / FREECODE_TASK_NOTIFY.)";
+    }
+    return result;
   }
+
+  // The parent's turn does not wait. Whatever happens — success, failure, a
+  // stop from /agents — the parent is told, or it would wait on a result
+  // that never comes. A session that ended first is dropped by the sink.
+  recordStart(parentSessionId, {
+    id: subagentId,
+    kind: "agent",
+    summary: params.task,
+  });
+  void runToCompletion().then((result) => {
+    recordEnd(parentSessionId, subagentId);
+    // Stopped by the parent with agent_stop: it asked for this, and the stop
+    // result already told it what the agent had done.
+    if (agents.stoppedByParent(subagentId)) return;
+    const status = killed()
+      ? "killed"
+      : result.success && result.result.metadata?.success
+        ? "completed"
+        : "failed";
+    notifyTask(parentSessionId, {
+      taskId: subagentId,
+      kind: "agent",
+      status,
+      summary: params.task,
+      result: result.success ? result.result.output : result.error,
+    });
+  });
+
+  return {
+    success: true,
+    result: {
+      title: `Agent: ${params.task}`,
+      output: [
+        `Started in the background as ${subagentId}.`,
+        "",
+        "Its result will arrive as a <task-notification> message when it finishes. Do not poll or wait for it: carry on with other work, or end your turn if there is none.",
+        `To change its instructions while it runs use agent_send(agent_id: "${subagentId}"); to cancel it, agent_stop.`,
+      ].join("\n"),
+      metadata: {
+        subagentId,
+        background: true,
+        ...(continued ? { continuedFrom: continued.sourceId } : {}),
+      },
+    },
+  };
 }
 
 // =============================================================================
@@ -370,13 +547,7 @@ async function executeSubagent(
 async function executeAgent(
   params: AgentParams,
   ctx: ToolContext,
-): Promise<
-  ToolExecutionResult<{
-    title: string;
-    output: string;
-    metadata?: Record<string, unknown>;
-  }>
-> {
+): Promise<AgentResult> {
   const hooks = (ctx as any).hooks as HookRuntime | undefined;
 
   if (!hooks) {
@@ -398,10 +569,14 @@ export const AgentTool: Tool<AgentParams> = buildTool({
 
 Use it when the work would burn context you have no further use for ("find everywhere X is wired up", "why is this test flaky"). Don't use it for work you can do directly — a known read, a single grep, an understood edit is faster inline.
 
+- Pick a \`subagent_type\` from 'Sub-agent types' in your instructions when one fits the task; without one it is \`general\`.
 - Put everything it needs in \`prompt\`: it starts cold unless forkContext: true (forks this session into it). Say exactly what you want back.
-- It is READ-ONLY by default and cannot write, edit, or run bash. Pass readOnly: false only when the task is to change code; it then runs with this session's permissions.
+- It is READ-ONLY by default and cannot write, edit, or run bash. When the task is to change code you must pass readOnly: false, or it will fail; it then runs with this session's permissions.
 - It cannot spawn sub-agents of its own. If your task needs delegating twice, do the outer half yourself.
-- Its result is not shown to the user — relay what matters yourself.`,
+- Its result is not shown to the user — relay what matters yourself.
+- To run several in parallel, make the calls in one response: read-only agents run at the same time and you get every result together. A writing agent (readOnly: false) always runs alone.
+- For a follow-up about a finished sub-agent's findings, pass \`continue: "<its id>"\` with the new prompt instead of starting over: it keeps its history.
+- run_in_background: true returns at once and delivers the result later as a <task-notification>. Use it for long work you don't need before your next step.`,
   schemas: {
     parameters: agentSchema,
   },
@@ -411,6 +586,13 @@ Use it when the work would burn context you have no further use for ("find every
   },
   behavior: {
     isConcurrencySafe: false,
+    // Read-only sub-agents may run side by side: explore mode removes
+    // write/edit/bash from their tool list, so two cannot race on the tree.
+    // A writing one stays sequential. Models ask for parallel work by putting
+    // two calls in one response — MiniMax-M3 does exactly that (the
+    // `delegation` eval), and those used to run one after the other.
+    concurrencySafeFor: (args) =>
+      coerceBoolean((args as AgentParams | undefined)?.readOnly) !== false,
     // A subagent runs arbitrary tools of its own and can mutate the
     // filesystem, so this must read the same as write/edit: triggers the
     // verify gate, counts toward stagnation, and is not safely retryable.

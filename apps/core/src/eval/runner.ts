@@ -56,6 +56,17 @@ const MEMORY_DRAIN_TIMEOUT_MS = envInt(
   { min: 1 },
 );
 
+/**
+ * Undo `initRunner`'s MCP boot. Each configured MCP server is a child process
+ * (Claude Code's are imported too, e.g. `npx @agentmemory/mcp`), and a live
+ * child holds node's event loop open: without this the suite prints its report
+ * and then never exits.
+ */
+export async function shutdownRunner(): Promise<void> {
+  const { stopMcpServers } = await import("../mcp/index.js");
+  await stopMcpServers();
+}
+
 /** Boots providers + MCP once for the whole suite, not once per case. */
 export async function initRunner(
   modelOverride?: string,
@@ -181,6 +192,8 @@ async function runTrialIn(
   const { endSession } = await import("../session/end-session.js");
   const { sessionMemoryFlush } = await import("../session/session-flush.js");
   const { SessionStoreTag } = await import("../effect/context.js");
+  const { getAgentRegistry } = await import("../agent/registry/index.js");
+  const { disposeShellRegistry } = await import("../tools/shells/index.js");
 
   const projectPath = sandbox?.dir ?? config.projectPath;
 
@@ -210,8 +223,14 @@ async function runTrialIn(
   // any call in that session — same convention as `costUsd` on the trial.
   const memorySnapshots: NonNullable<TrialResult["memorySnapshots"]> = [];
   let consolidation: ConsolidationResult | null | undefined;
-  const ownsSession = (id: string | undefined) =>
-    id === undefined || id === sessionId || earlierSessionIds.includes(id);
+  // A subagent asks under its own synthetic id; it belongs to this trial when
+  // its tree hangs off one of the trial's sessions. Without this a writing
+  // subagent's permission prompt went unanswered until the trial timed out.
+  const ownsSession = (id: string | undefined): boolean => {
+    if (id === undefined) return true;
+    const root = getAgentRegistry().rootOf(id);
+    return root === sessionId || earlierSessionIds.includes(root);
+  };
 
   // The rollout log deliberately carries no message bodies (spec §5.2), so the
   // reply text is captured live here. Nothing scores it in Phase 1; the judge
@@ -269,6 +288,14 @@ async function runTrialIn(
     unsubscribe();
     unsubscribeQuestions();
     unsubscribePermissions();
+    // The scored session never goes through endSession, so a background
+    // subagent or shell (`run_in_background`) would outlive its trial: spending
+    // tokens the trial does not count, writing into a sandbox about to be
+    // deleted, and holding the process open after the report.
+    for (const id of [sessionId, ...earlierSessionIds]) {
+      getAgentRegistry().disposeRoot(id);
+      disposeShellRegistry(id);
+    }
   };
 
   const startedAt = Date.now();

@@ -10,6 +10,7 @@ import { compileInstructionsSection } from "./instructions.js";
 import { loadSystemPromptFor } from "../session/prompt.js";
 import { renderAvailableSkillsSection } from "../skills/prompt.js";
 import { buildMemoryGuidanceBlock } from "../memory/mem-prompt.js";
+import { renderAgentTypesSection } from "../agent/definitions/index.js";
 
 // ===========================================================================
 // System Prompts per Agent Mode
@@ -48,7 +49,7 @@ Use with extreme caution - you can break things permanently.`,
 
 /** A named part of the static system prompt. */
 export interface SystemSegment {
-  id: "system-prompt" | "project-instructions" | "skills" | "memory-guidance";
+  id: "system-prompt" | "project-instructions" | "skills" | "agent-types" | "memory-guidance";
   label: string;
   /** "" when the section has nothing to contribute (no CLAUDE.md, no skills). */
   text: string;
@@ -159,6 +160,11 @@ ${tree}`;
         text: compileInstructionsSection(this.projectPath),
       },
       { id: "skills", label: "Skills", text: skills },
+      {
+        id: "agent-types",
+        label: "Sub-agent types",
+        text: renderAgentTypesSection(this.projectPath),
+      },
       {
         id: "memory-guidance",
         // Constant text — safe in the cached prefix. The memories themselves are

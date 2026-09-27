@@ -5,7 +5,7 @@ import { parseAgentActivity as parseActivity } from "@thisisayande/freecode-shar
 import { BusEvents } from "../../bus/index.js";
 
 function spawn(reg: AgentRegistry, id: string, parentId: string) {
-  return reg.register({ id, parentId, task: `task ${id}`, agentType: "agent" });
+  return reg.register({ id, parentId, task: `task ${id}`, prompt: `prompt ${id}`, agentType: "agent" });
 }
 
 test("an agent spawned by a root session sits at depth 1 under that root", () => {
@@ -111,6 +111,7 @@ test("stop interrupts the loop and settles the row without waiting for it", () =
     id: "a1",
     parentId: "root",
     task: "t",
+    prompt: "p",
     agentType: "agent",
     interrupt: () => {
       interrupted = true;
@@ -152,6 +153,7 @@ test("disposeRoot stops and forgets only that root's tree", () => {
     id: "a1",
     parentId: "root-a",
     task: "t",
+    prompt: "p",
     agentType: "agent",
     interrupt: () => {
       stopped++;

@@ -8,7 +8,7 @@
 import * as path from "path";
 import type { AgentMode } from "../agent/types.js";
 import type { PermissionRuleDecision } from "./rule-types.js";
-import { extractTarget } from "./rules.js";
+import { COMMAND_TOOLS, extractTarget } from "./rules.js";
 
 export type ToolKind = "readonly" | "mutating";
 
@@ -135,7 +135,7 @@ function targetsInsideProject(
   projectRoot: string,
 ): boolean {
   const target = extractTarget(toolName, args);
-  if (!target || isNetworkTool(toolName) || toolName.toLowerCase() === "bash") {
+  if (!target || isNetworkTool(toolName) || COMMAND_TOOLS.has(toolName.toLowerCase())) {
     return true; // no path target to judge — handled by kind/network checks
   }
   const rel = path.relative(projectRoot, path.resolve(projectRoot, target));

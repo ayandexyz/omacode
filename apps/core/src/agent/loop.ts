@@ -198,6 +198,14 @@ import {
 // working for tests and legacy call sites.
 // =============================================================================
 
+/** A message waiting for the next tool-batch boundary — see steer(). */
+export interface PendingSteer {
+  id: string;
+  text: string;
+  /** "steer": the user typed it; "task_notification": a background task finished. */
+  synthetic: "steer" | "task_notification";
+}
+
 // How many times a single run may compact in response to the provider
 // rejecting the request as too long. Each attempt is a full round trip, so an
 // unbounded retry loop is expensive and, when compaction cannot free enough,
@@ -439,8 +447,14 @@ export class AgentLoop {
   // Steering queue (spec 2026-09-20-pi-parity-plan, Phase 1): user messages
   // that arrived mid-turn. Drained into the transcript between one tool batch
   // and the next model call — see drainSteers(). Distinct from the server's
-  // follow-up queue, which waits for the run to end.
-  private pendingSteers: Array<{ id: string; text: string }> = [];
+  // follow-up queue, which waits for the run to end. Task notifications
+  // (agent/task-notify.ts) ride the same queue so a background result lands
+  // mid-turn instead of waiting for the run to end.
+  private pendingSteers: PendingSteer[] = [];
+  // The provider/model this run was asked to use, handed to tools so a
+  // subagent runs on the same model as its parent. Session meta cannot answer
+  // that: the model is usually chosen per turn and never written there.
+  private runModel: { provider?: string; model?: string } = {};
   // Loop-health reasons already turned into a reminder this run.
   private healthWarned = new Set<string>();
   private turnsSinceTodoWrite = 0;
@@ -739,6 +753,7 @@ export class AgentLoop {
       projectPath: input.projectPath,
       agentMode: input.agentMode ?? "build",
       effort: input.effort,
+      role: input.role,
       // Loop health is per-run: carrying a previous run's counters across
       // prompts would let its history stop the *next* run at the health check
       // before it ever reached the provider.
@@ -754,12 +769,16 @@ export class AgentLoop {
     };
     // Fresh cancellation scope per run
     this.abort = new AbortController();
+    this.runModel = { provider: input.provider, model: input.model };
 
     // Reset per-run reminder state (this instance is reused across turns).
     this.recentToolCalls = [];
     this.recentEdits = [];
     this.pendingReminders = [];
-    this.pendingSteers = [];
+    // pendingSteers is NOT reset here: the server can steer this loop (a
+    // task notification can land at any moment) between registering it as
+    // active and run() starting, and a reset would drop that message.
+    // Leftovers are emptied at the end by takeUndeliveredSteers().
     this.healthWarned = new Set<string>();
     this.turnsSinceTodoWrite = 0;
     this.turnsSinceLastNudge = 0;
@@ -896,7 +915,7 @@ export class AgentLoop {
       await this.appendUserMessage(
         input.prompt,
         imageParts,
-        {},
+        input.synthetic ? { synthetic: input.synthetic } : {},
         initialUserMessage.id,
       );
       this.memory.addMessage("user", input.prompt);
@@ -1718,6 +1737,14 @@ export class AgentLoop {
         provider,
         model,
       );
+      // A subagent's role (its definition file) is fixed for the run, so it
+      // can sit in the cached prefix.
+      if (this.state.role?.prompt && systemBlocks[0]) {
+        systemBlocks[0] = {
+          ...systemBlocks[0],
+          text: `${systemBlocks[0].text}\n\n# Your role: ${this.state.role.name}\n${this.state.role.prompt}`,
+        };
+      }
 
       // These are recompiled from disk every turn, so a mid-session CLAUDE.md
       // edit rewrites the cached prefix. Document it here or D2 reports the
@@ -2291,7 +2318,11 @@ export class AgentLoop {
     streamed?: boolean;
   }> {
     const aiProvider = getProvider(provider as any);
-    const tools = getToolDefs(this.state.agentMode);
+    // A definition's allowlist narrows what the mode allows, never widens it.
+    const allowed = this.state.role?.tools;
+    const tools = allowed
+      ? getToolDefs(this.state.agentMode).filter((t) => allowed.includes(t.name))
+      : getToolDefs(this.state.agentMode);
 
     // Cap tool results in old history turns to prevent token explosion on long
     // sessions. The model already processed those results fully when they were
@@ -2887,6 +2918,17 @@ export class AgentLoop {
       toolUseId: toolCall.id,
     };
 
+    // A tool outside the role's allowlist was never offered; a call to one
+    // is a hallucination or an old transcript, and must not run.
+    const roleTools = this.state.role?.tools;
+    if (roleTools && !roleTools.includes(toolCall.tool)) {
+      return this.denyToolCall(
+        toolCall,
+        "role",
+        `Tool ${toolCall.tool} is not available to the ${this.state.role!.name} agent. Its tools: ${roleTools.join(", ")}.`,
+      );
+    }
+
     // PreToolUse Hook — can block or modify tool call
     const preResult = await this.hooks.runPreToolUse(toolCall, hookContext);
     this.recorder.recordHookTriggered(
@@ -3048,6 +3090,8 @@ export class AgentLoop {
       // whole of a build (see bash.ts).
       toolCallId: toolCall.id,
       agentMode: this.state.agentMode,
+      provider: this.runModel.provider,
+      model: this.runModel.model,
       abort: this.abort.signal,
     };
 
@@ -3350,15 +3394,20 @@ export class AgentLoop {
   // routes to the follow-up queue instead when no loop is active, and a
   // steer left over at completion is returned by takeUndeliveredSteers().
   // ===========================================================================
-  steer(text: string, id: string = randomUUID()): void {
-    this.pendingSteers.push({ id, text });
+  steer(
+    text: string,
+    id: string = randomUUID(),
+    synthetic: PendingSteer["synthetic"] = "steer",
+  ): void {
+    this.pendingSteers.push({ id, text, synthetic });
   }
 
   // Steers that never reached the model because the run ended (interrupt,
   // failure, hard stop) before the next drain point. The server re-parks
-  // them as follow-ups so a user's words are never dropped.
-  takeUndeliveredSteers(): string[] {
-    const left = this.pendingSteers.map((s) => s.text);
+  // them — a user's words as follow-ups, a notification as a notification —
+  // so neither is ever dropped.
+  takeUndeliveredSteers(): PendingSteer[] {
+    const left = this.pendingSteers;
     this.pendingSteers = [];
     return left;
   }
@@ -3383,7 +3432,7 @@ export class AgentLoop {
     // fingerprint no longer describes this list — an unchanged list after a
     // steer is a fresh stop, not a repeat.
     this.pokeState = { ...this.pokeState, lastFingerprint: undefined };
-    for (const { id, text } of batch) {
+    for (const { id, text, synthetic } of batch) {
       this.history.push({
         id,
         role: "user",
@@ -3391,16 +3440,20 @@ export class AgentLoop {
         timestamp: Date.now(),
       });
       this.memory.addMessage("user", text);
-      await this.appendUserMessage(text, [], { synthetic: "steer" }, id);
+      await this.appendUserMessage(text, [], { synthetic }, id);
       this.recorder.recordMessageSteered(turnId, {
         messageId: id,
         remaining: this.pendingSteers.length,
       });
-      BusEvents.stream(this.state.sessionId, {
-        type: "message_steered",
-        id,
-        content: text,
-      });
+      // A notification never had a queued row to promote; the server already
+      // told the frontend with a notice when it arrived.
+      if (synthetic === "steer") {
+        BusEvents.stream(this.state.sessionId, {
+          type: "message_steered",
+          id,
+          content: text,
+        });
+      }
     }
     return true;
   }

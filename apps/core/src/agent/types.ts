@@ -7,6 +7,7 @@
 //          is critical as changing them later becomes painful
 // =============================================================================
 
+import type { AgentRole } from "./definitions/types.js";
 import type { EffortLevel } from "@thisisayande/freecode-shared";
 import { createRedirectState, type RedirectState } from "./redirect/policy.js";
 
@@ -249,6 +250,8 @@ export interface SessionState {
   pendingToolCalls: ToolCall[];
   activeToolChain?: string[]; // For compaction awareness
   effort?: EffortLevel;
+  /** Set for a subagent spawned from a definition; see UserInput.role. */
+  role?: AgentRole;
 }
 
 export function createInitialSessionState(
@@ -312,6 +315,10 @@ export interface UserInput {
   projectPath: string;
   agentMode?: AgentMode;
   effort?: EffortLevel;
+  /** Set when the harness, not the user, wrote the prompt (a task notification). */
+  synthetic?: "task_notification";
+  /** A subagent's definition (`agent({ subagent_type })`): its prompt and tool allowlist. */
+  role?: AgentRole;
 }
 
 export interface LoopResult {

@@ -7,6 +7,15 @@ import * as path from "path";
 import * as os from "os";
 import type { PermissionRule, PermissionRuleSet, PermissionSettings } from "./rule-types.js";
 
+/**
+ * Tools whose target is a shell `command`, matched like `Bash(npm test:*)`.
+ * `monitor` runs arbitrary commands too, so it gets exactly bash's rules —
+ * never a bare `Monitor` that would approve any command.
+ */
+export const COMMAND_TOOLS = new Set(["bash", "monitor"]);
+/** The one rule that allows `monitor({ bash_id })`; no command matches it. */
+export const ATTACH_PATTERN = "bash_id:*";
+
 const PATH_TOOLS = new Set(["read", "ls", "write", "edit", "glob", "grep"]);
 const URL_TOOLS = new Set(["webfetch", "websearch"]);
 // Shell separators: a prefix rule never matches a command containing one
@@ -47,12 +56,15 @@ export function parseRuleSet(settings: PermissionSettings | undefined): Permissi
 /** The argument value a pattern is matched against, per tool family */
 export function extractTarget(toolName: string, args: Record<string, unknown>): string | undefined {
   const tool = toolName.toLowerCase();
-  if (tool === "bash") return args.command as string | undefined;
+  if (COMMAND_TOOLS.has(tool)) return args.command as string | undefined;
   if (PATH_TOOLS.has(tool)) {
     return (args.filePath ?? args.path ?? args.cwd) as string | undefined;
   }
   if (URL_TOOLS.has(tool)) return (args.url ?? args.query) as string | undefined;
-  if (tool === "agent") return (args.agentType as string | undefined) ?? "";
+  // `Agent(reviewer)` names a sub-agent type; `agentType` is the old alias.
+  if (tool === "agent") {
+    return ((args.subagent_type ?? args.agentType) as string | undefined) ?? "";
+  }
   return undefined;
 }
 
@@ -71,7 +83,14 @@ export function ruleMatches(
   // MCP tools: argument patterns unsupported in v1 — never match (fail closed)
   if (tool.startsWith("mcp__")) return false;
 
-  if (tool === "bash") return matchBash(rule.pattern, args.command);
+  if (COMMAND_TOOLS.has(tool)) {
+    // monitor({ bash_id }) runs nothing new — it watches a shell already
+    // approved — so it has its own rule rather than matching every command.
+    if (args.command === undefined && typeof args.bash_id === "string") {
+      return rule.pattern === ATTACH_PATTERN;
+    }
+    return matchBash(rule.pattern, args.command);
+  }
   if (PATH_TOOLS.has(tool)) {
     return matchPath(rule.pattern, extractTarget(tool, args), projectRoot);
   }

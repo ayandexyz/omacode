@@ -17,6 +17,8 @@ const agent = (over: Partial<AgentSummary> = {}): AgentSummary => ({
   parentId: "root",
   rootId: "root",
   task: "Find every call site",
+  prompt: "",
+  background: false,
   agentType: "agent",
   depth: 1,
   status: "running",
@@ -67,6 +69,28 @@ test("shows the agent's task, status and replayed activity", () => {
   assert.match(out, /matched 3 files/);
   assert.equal(v.agentId(), "a1");
   assert.equal(v.messageCount(), 2, "one tool group and one assistant row");
+});
+
+test("the parent's prompt opens the transcript as a user message", () => {
+  const v = viewer();
+  v.setMaxRows(30);
+  v.open(agent({ prompt: "Grep for runSessionTurn and report callers" }), [
+    text("found 2 callers"),
+  ]);
+  const out = strip(v.render(80));
+  assert.match(out, /Grep for runSessionTurn and report callers/);
+  assert.ok(
+    out.indexOf("Grep for runSessionTurn") < out.indexOf("found 2 callers"),
+    "the prompt comes before the agent's reply",
+  );
+  assert.equal(v.messageCount(), 2);
+});
+
+test("a background agent is labelled as one", () => {
+  const v = viewer();
+  v.setMaxRows(20);
+  v.open(agent({ background: true }), []);
+  assert.match(strip(v.render(80)), /Background subagent: Find every call site/);
 });
 
 test("an empty transcript says so instead of rendering blank rows", () => {

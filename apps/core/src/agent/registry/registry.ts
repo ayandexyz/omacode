@@ -15,6 +15,7 @@
 import { bus } from "../../bus/index.js";
 import type { AgentReadResult, AgentStatus, AgentSummary } from "./types.js";
 import { formatActivity } from "./activity.js";
+import type { AgentRole } from "../definitions/types.js";
 
 /** Per-agent ring-buffer cap. Smaller than a shell's: this is a summary. */
 export const AGENT_BUFFER_CHARS = 64_000;
@@ -37,11 +38,25 @@ export const MAX_AGENT_DEPTH = 1;
 /** Ceiling on subagents running concurrently under one root session. */
 export const MAX_AGENTS_PER_ROOT = 8;
 
+/**
+ * How an agent was spawned, so `agent({ continue })` can run the next
+ * generation the same way: a continuation never changes role or authority.
+ */
+export interface AgentSpawnConfig {
+  definition: string;
+  readOnly: boolean;
+  provider: string;
+  model?: string;
+  role?: AgentRole;
+}
+
 export interface AgentRegisterOptions {
   id: string;
   /** Session that spawned it: the root session, or another agent's id. */
   parentId: string;
   task: string;
+  prompt: string;
+  background?: boolean;
   agentType: string;
   /** Cancels the subagent's loop; wired to `AgentLoop.interrupt`. */
   interrupt?: () => void;
@@ -56,6 +71,8 @@ interface AgentRecord {
   parentId: string;
   rootId: string;
   task: string;
+  prompt: string;
+  background: boolean;
   agentType: string;
   depth: number;
   status: AgentStatus;
@@ -67,6 +84,13 @@ interface AgentRecord {
   interrupt?: () => void;
   /** `stop()` arrived before the loop existed; fire the interrupt on attach. */
   pendingStop?: boolean;
+  /** Delivers a parent's `agent_send` message into the loop; late-bound. */
+  steer?: (text: string) => void;
+  /** Messages sent before the loop existed, flushed on attach. */
+  pendingMessages: string[];
+  /** Its parent stopped it with `agent_stop`: no completion notice is owed. */
+  stoppedByParent?: boolean;
+  spawnConfig?: AgentSpawnConfig;
   onActivity?: (id: string, chunk: string) => void;
   onExit?: (id: string, status: AgentStatus) => void;
 }
@@ -90,12 +114,15 @@ export class AgentRegistry {
       parentId: options.parentId,
       rootId,
       task: options.task,
+      prompt: options.prompt,
+      background: options.background ?? false,
       agentType: options.agentType,
       depth,
       status: "running",
       startedAt: Date.now(),
       buf: "",
       droppedChars: 0,
+      pendingMessages: [],
       interrupt: options.interrupt,
       onActivity: options.onActivity,
       onExit: options.onExit,
@@ -141,6 +168,56 @@ export class AgentRegistry {
         // Same as stop(): the row is already settled, nothing to unwind.
       }
     }
+  }
+
+  /**
+   * Late-bind the message handle, like `attachInterrupt`: an `agent_send` that
+   * arrived before the loop existed is delivered here, in order.
+   */
+  attachSteer(id: string, steer: (text: string) => void): void {
+    const record = this.agents.get(id);
+    if (!record) return;
+    record.steer = steer;
+    for (const text of record.pendingMessages.splice(0)) steer(text);
+  }
+
+  /**
+   * A message from the parent to a running agent (`agent_send`). Delivered at
+   * the agent's next steer point; queued if its loop does not exist yet.
+   * False for an unknown or settled agent.
+   */
+  send(id: string, text: string): boolean {
+    const record = this.agents.get(id);
+    if (!record || record.status !== "running") return false;
+    if (record.steer) record.steer(text);
+    else record.pendingMessages.push(text);
+    return true;
+  }
+
+  /** Messages that never reached the loop: it settled before attaching. */
+  takeUndelivered(id: string): string[] {
+    return this.agents.get(id)?.pendingMessages.splice(0) ?? [];
+  }
+
+  /** Recorded once the spawn is fully resolved; read by `agent({ continue })`. */
+  setSpawnConfig(id: string, config: AgentSpawnConfig): void {
+    const record = this.agents.get(id);
+    if (record) record.spawnConfig = config;
+  }
+
+  spawnConfigOf(id: string): AgentSpawnConfig | undefined {
+    return this.agents.get(id)?.spawnConfig;
+  }
+
+  /** The parent stopped it itself, so the parent needs no completion notice. */
+  stoppedByParent(id: string): boolean {
+    return this.agents.get(id)?.stoppedByParent === true;
+  }
+
+  /** The last `maxChars` of activity, without touching any cursor. */
+  tail(id: string, maxChars: number): string {
+    const buf = this.agents.get(id)?.buf ?? "";
+    return buf.length > maxChars ? buf.slice(-maxChars) : buf;
   }
 
   /** Mark an agent finished. Idempotent: the first settle wins. */
@@ -198,9 +275,10 @@ export class AgentRegistry {
    * stop is then a no-op and the panel flips immediately. The loop's own
    * completion path finds the record already settled and does nothing.
    */
-  stop(id: string): boolean {
+  stop(id: string, byParent = false): boolean {
     const record = this.agents.get(id);
     if (!record || record.status !== "running") return false;
+    if (byParent) record.stoppedByParent = true;
     if (record.interrupt) {
       try {
         record.interrupt();
@@ -300,6 +378,8 @@ function summarize(record: AgentRecord): AgentSummary {
     parentId: record.parentId,
     rootId: record.rootId,
     task: record.task,
+    prompt: record.prompt,
+    background: record.background,
     agentType: record.agentType,
     depth: record.depth,
     status: record.status,

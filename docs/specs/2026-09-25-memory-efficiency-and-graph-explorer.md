@@ -535,6 +535,13 @@ when they started a class, who gave them a gift. The model answered
 honestly throughout: every miss was "I have no record of that", never an
 invented fact.
 
+**Predicted by the adapter's smoke run.** Before the corpus run, a synthetic
+4-session haystack (one session: "I just adopted a beagle puppy... I named
+him Biscuit") ingested cleanly ($0.00046) but saved **zero** memories, and a
+fresh session asked "what is the name of my dog?" answered that it had no
+record. One trial, one model, but the same extraction-scope gap the corpus
+run then showed at scale.
+
 **Cost.** Ingestion $0.713 (1,090 extraction calls), scored turns $0.080.
 The judge ran on an OAuth subscription, so it is unpriced (`undefined`, not
 $0).
@@ -551,7 +558,8 @@ as scoped, does not retain general personal-assistant facts from long chat
 histories. It says nothing about retrieval quality or consolidation on this
 corpus, because nothing reached them. Widening what extraction keeps is a
 product-scope decision (and a cost one: more saves, more injected bytes), not
-a fix to make against this benchmark — which ROADMAP #6 forbids tuning on.
+a fix to make against this benchmark, which this run was deliberately not
+tuned on.
 
 ## 8. Completion checklist
 

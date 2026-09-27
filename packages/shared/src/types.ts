@@ -211,7 +211,9 @@ export interface SerializedMessage {
   // "steer": the user typed it mid-turn (spec 2026-09-20-pi-parity-plan
   // Phase 1). Persisted as a real user turn for the same reason as the poke;
   // the frontend renders it as a normal user message, badged "steered".
-  synthetic?: "auto_poke" | "steer" | "branch_summary";
+  // "task_notification": a background task finished (agent/task-notify.ts);
+  // the frontend renders a one-line notice, not the XML.
+  synthetic?: "auto_poke" | "steer" | "branch_summary" | "task_notification";
   /** True if the previous turn ended mid-stream; core appends a resume marker. */
   interrupted?: boolean;
 }
@@ -308,6 +310,7 @@ export type ContextSegmentId =
   | "system-prompt"
   | "project-instructions"
   | "skills"
+  | "agent-types"
   | "memory-guidance"
   | "tools"
   | "mcp-tools"
@@ -523,6 +526,11 @@ export interface AgentSummary {
   rootId: string;
   /** The task description, shown as the row title. */
   task: string;
+  /** The full instruction the parent sent — the viewer's first message. */
+  prompt: string;
+  /** Spawned with run_in_background: the parent did not wait for it. */
+  background: boolean;
+  /** Sub-agent type: a definition name ("general", "explorer", …). */
   agentType: string;
   /** 1 for an agent the main session spawned. */
   depth: number;

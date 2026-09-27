@@ -19,17 +19,18 @@ Dedicated tools cost less context and give more: \`read\` (NOT cat/head/tail/sed
 
 - Non-interactive only: stdin is closed; pass \`-y\`/\`--yes\`/\`--no-input\`.
 - Use \`workdir\` instead of \`cd\` (does not carry over). Quote paths with spaces.
-- \`timeout\` is milliseconds (default 60000); raise for long builds/tests.
+- \`timeout\` is milliseconds (default 60000, max 600000 = 10 minutes). A command still running when it expires is moved to the background, not killed — unless you set \`timeout\` below the max yourself, which means "kill it then".
 - Chain dependent steps with \`&&\`; send independent commands as parallel tool calls in one message.
 - Output is capped; the truncation marker names the \`output\` tool call that pages the rest — use it instead of re-running.
 
 ## Long-running commands
 
-Anything that does not exit on its own — a dev server, a watcher, \`docker compose up\`, \`tail -f\` — must use \`run_in_background: true\`. It returns a shell id immediately instead of holding the turn until the timeout kills it, so you can keep working while it runs.
+Use \`run_in_background: true\` for anything that does not exit on its own — a dev server, a watcher, \`docker compose up\`, \`tail -f\` — and for anything that may run longer than 10 minutes: full test or eval suites, long builds, data jobs. It returns a shell id immediately instead of holding the turn until the timeout kills it.
 
-- \`bashoutput(bash_id)\` returns only the output that arrived since your last call, plus status and exit code. Poll it; do not re-run the command to see more.
+- When a background command exits you get a \`<task-notification>\` with its exit code and the tail of its output. Do not poll, and never \`sleep\` waiting for it: carry on with other work, or end your turn and report when the notification arrives.
+- \`bashoutput(bash_id)\` returns only the output that arrived since your last call, plus status and exit code — use it to check progress or read more than the notification's tail. Do not re-run the command to see more.
 - \`killbash(bash_id)\` stops it and its whole process tree. Stop what you started once you are done with it.
-- A build or test suite that merely takes a few minutes should stay in the foreground with a raised \`timeout\` — background it only if you have other work to do while it runs.
+- A build or test suite that takes a few minutes can stay in the foreground with a raised \`timeout\`; background it if it might pass 10 minutes or you have other work to do meanwhile.
 
 ## Git
 

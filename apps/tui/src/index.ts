@@ -141,10 +141,10 @@ import { SafeTUI } from "./render-guard.js";
 import { ENTER_ALT_SCREEN, restoreScreen } from "./terminal-screen.js";
 import { installCrashHandlers } from "./crash-handler.js";
 // import { ResponsiveInfoBox } from "./components/info-box.js"; // commented out: header disabled
-// import { StatusHeader } from "./components/status-header.js"; // commented out: context moved to ContextBox overlay
+// import { StatusHeader } from "./components/status-header.js"; // commented out: context moved to the status row (context-status.ts)
 import { LogoHeader } from "./components/logo-header.js";
 import { checkForUpdate } from "./utils/update-check.js";
-import { ContextBox } from "./components/context-box.js";
+import { ContextMisses, contextSummary } from "./components/context-status.js";
 import { ModeLine } from "./components/mode-line.js";
 import {
   isCredentialRow,
@@ -181,6 +181,13 @@ let currentSession: SessionInfo | null = null;
 // Session id of the turn currently streaming, or null when idle. Drives whether
 // Ctrl+C cancels the turn (busy) or moves toward exit (idle).
 let activeTurnSessionId: string | null = null;
+// A turn core started on its own (`turn_started`): a drained follow-up or a
+// task notification. No session.send is waiting on it, so none of
+// submitPrompt's bookkeeping runs — this is the whole of its busy state.
+let coreTurn: { sessionId: string; rowId: number } | null = null;
+/** Only the current session's core turn counts; one left from a switch doesn't. */
+const coreTurnActive = (): boolean =>
+  coreTurn !== null && coreTurn.sessionId === currentSession?.sessionId;
 let currentProvider = "";
 let currentModel = "";
 // Undefined, not "low": an explicit level is sent on every turn, so a default
@@ -354,26 +361,6 @@ const logoHeader = new LogoHeader(
   () => headerUpdateVersion,
 );
 
-// Floating top-right one-line overlay showing context usage as `tokens / limit`.
-// Non-capturing so it never steals focus from the editor; hidden on narrow
-// terminals so it can't crowd the chat.
-const contextBox = new ContextBox(
-  () => hasFirstMessage,
-  () => contextTokens,
-  () => contextLimitTokens,
-  () => contextCacheRate,
-  () => contextCacheStats,
-);
-const contextBoxOverlay = tui.showOverlay(contextBox, {
-  anchor: "top-right",
-  width: contextBox.width(),
-  offsetX: 0,
-  offsetY: 0,
-  nonCapturing: true,
-  // The widget is 46 columns wide; below 90 it would cover half the chat.
-  visible: (termWidth) => termWidth >= 90,
-});
-
 // tui.addChild(new Text("\nType your messages below. Press Ctrl+C to exit."));
 
 // Text selection: click-drag over the message history highlights and, on
@@ -439,7 +426,7 @@ editor.statusLabel = () => {
 // Outside a repo it falls back to the turn number: `messageCount` counts
 // sent prompts and resets with the session, so the next one is always +1.
 editor.promptLabel = () => readGitBranch() ?? messageCount + 1;
-editor.isProcessing = () => activeTurnSessionId !== null;
+editor.isProcessing = () => activeTurnSessionId !== null || coreTurnActive();
 
 // `@` file mentions run on fd when it is installed and on a JS tree walk when
 // it is not, so completion works the same on a machine without fd (Windows,
@@ -450,7 +437,26 @@ const autocompleteProvider = createAutocompleteProvider(
 );
 editor.setAutocompleteProvider(autocompleteProvider);
 
+// Context usage + cache ratios on the status row under the input (left side),
+// cache misses listed below it when there are any. In the layout, not an
+// overlay: the old top-right overlay covered conversation text. Blank while a
+// subagent is on screen — the numbers are the MAIN session's.
+editor.statusContext = () =>
+  hasFirstMessage && agentViewer === null
+    ? contextSummary(
+        contextTokens,
+        contextLimitTokens,
+        contextCacheRate,
+        contextCacheStats,
+      )
+    : null;
+const contextMisses = new ContextMisses(
+  () => (hasFirstMessage && agentViewer === null ? contextCacheStats : undefined),
+  () => editor.promptIndent,
+);
+
 tui.addChild(editor);
+tui.addChild(contextMisses);
 tui.addChild(new Spacer(1));
 // /shells and /agents chips below the input; mode and model sit on the
 // input's bottom border (`editor.statusLabel` above).
@@ -2016,10 +2022,27 @@ function handleToolEvent(event: StreamEvent) {
     // RPC's own success:false response and whichever lands first wins; on the
     // escaped-error path that response never comes and this is the only thing
     // standing between the user and a spinner stuck on the idle deadline.
+    // Core started a turn nobody is awaiting: give it the same spinner row,
+    // interrupt and steering a typed prompt gets (see beginCoreTurn).
+    case "turn_started": {
+      if (event.sessionId && event.sessionId === currentSession?.sessionId) {
+        beginCoreTurn(event.sessionId, event.queuedId);
+        tui.requestRender();
+      }
+      break;
+    }
+    case "done": {
+      if (coreTurn && event.sessionId === coreTurn.sessionId) {
+        endCoreTurn();
+        tui.requestRender();
+      }
+      break;
+    }
     case "session.error": {
       const ownSessionId = activeTurnSessionId ?? currentSession?.sessionId;
       if (event.sessionId && ownSessionId && event.sessionId !== ownSessionId)
         break;
+      if (coreTurn && event.sessionId === coreTurn.sessionId) endCoreTurn();
       if (!failActiveStream(event.error)) {
         // No send pending (error arrived between turns) — render it directly.
         createSystemMessage(`**Error:** ${event.error}`);
@@ -2028,6 +2051,33 @@ function handleToolEvent(event: StreamEvent) {
       break;
     }
   }
+}
+
+/**
+ * A core-started turn begins: promote its queued row (a drained follow-up is
+ * that row's turn), reset the live token counters, and show
+ * the in-progress row. Ends on the turn's `done`, a `session.error`, or an
+ * interrupt.
+ */
+function beginCoreTurn(sessionId: string, queuedId?: string): void {
+  endCoreTurn();
+  if (queuedId) promoteQueuedToUser(queuedId);
+  // Not renderedTextThisRun: that flag is submitPrompt's, read after its RPC
+  // returns — and a notification turn can start inside that window (the
+  // previous turn's tail waits 500ms), which re-rendered its reply twice.
+  streamedChars = 0;
+  resetLiveOutputTokens();
+  resetLiveInputTokens();
+  resetLiveUsageTotals();
+  const row = createInProgressMessage(getRandomInProgressPhrase());
+  coreTurn = { sessionId, rowId: row.id };
+}
+
+function endCoreTurn(): void {
+  if (!coreTurn) return;
+  removeMessageById(coreTurn.rowId);
+  finalizeAssistantText();
+  coreTurn = null;
 }
 
 // Send a prompt to the agent through the streaming session. `displayText`, when
@@ -2498,10 +2548,12 @@ async function refreshCoreCommands(): Promise<void> {
 }
 
 const interruptController = new InterruptController({
-  isTurnActive: () => activeTurnSessionId !== null,
+  isTurnActive: () => activeTurnSessionId !== null || coreTurnActive(),
   cancelTurn: () => {
-    const id = activeTurnSessionId;
+    const id =
+      activeTurnSessionId ?? (coreTurnActive() ? coreTurn!.sessionId : null);
     activeTurnSessionId = null;
+    endCoreTurn();
     if (id) void sessionStop(id);
   },
   notify: (text) => showMessage(text),
@@ -2828,17 +2880,28 @@ function jumpButtonHit(cx: number, cy: number): boolean {
   );
 }
 
-/** Which row of the top-right context widget a click at (cx, cy) — 1-based —
- * landed on: 1 is the tokens/limit line, 2 the cache line, 0 a miss. Mirrors
- * the overlay's own visibility: hidden on narrow terminals and rendered empty
- * until a limit is known. */
-function contextBoxHit(cx: number, cy: number): number {
-  if (terminal.columns < 90) return 0;
-  const width = contextBox.width();
-  const height = contextBox.render(width).length;
-  const left = terminal.columns - width + 1; // 1-based, flush right
-  if (cy < 1 || cy > height || cx < left || cx >= left + width) return 0;
-  return cy;
+/** Which part of the status row's context summary a click at (cx, cy) —
+ * 1-based — landed on: 1 the tokens/limit text, 2 the cache ratios, 0 neither.
+ * The editor records where it drew them. pi-tui draws from the top until the
+ * frame outgrows the terminal, then keeps the bottom in view — so a short
+ * session's input sits right under its content, not at the bottom edge. */
+function contextStatusHit(cx: number, cy: number): number {
+  const status = editor.lastStatus;
+  if (!status) return 0;
+  const idx = tui.children.indexOf(editor);
+  if (idx < 0) return 0;
+  const above = tui.children
+    .slice(0, idx)
+    .reduce((sum, child) => sum + tui.renderChild(child, terminal.columns).length, 0);
+  const chrome = inputChromeHeight();
+  const editorTop =
+    above + chrome <= terminal.rows ? above + 1 : terminal.rows - chrome + 1;
+  if (cy !== editorTop + status.row) return 0;
+  const col = cx - 1;
+  const inside = (r?: [number, number]) => !!r && col >= r[0] && col < r[1];
+  if (inside(status.layout.tokens)) return 1;
+  if (inside(status.layout.cache)) return 2;
+  return 0;
 }
 
 function extractSelectionText(): string {
@@ -2896,7 +2959,7 @@ tui.addInputListener((data) => {
     // Checked before the selection handling below, since the pill sits on top
     // of the history and a press there must not start a drag-select.
     // Top-right widget: the usage line opens /context, the cache line /cost.
-    const widgetRow = button === 0 && !isDrag ? contextBoxHit(cx, cy) : 0;
+    const widgetRow = button === 0 && !isDrag ? contextStatusHit(cx, cy) : 0;
     if (widgetRow > 0) {
       void (widgetRow === 1 ? openContextReport() : openCostReport());
       return { consume: true };

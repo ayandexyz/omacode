@@ -11,6 +11,7 @@ import type { AgentSummary, StreamEvent } from "@thisisayande/freecode-shared";
 import { MessageStore } from "../state/message-store.js";
 import { Transcript } from "./transcript.js";
 import { VirtualMessageList } from "./virtual-message-list.js";
+import { createMessageComponent } from "./message-row.js";
 
 const accent = palette.accent2;
 const dim = palette.muted;
@@ -76,6 +77,16 @@ export class AgentViewer implements Component {
     this.agent = agent;
     this.transcript.reset();
     this.store.clear();
+    // The instruction the parent sent opens the transcript as a user turn,
+    // exactly as the main agent's own prompt does. It lives on the roster
+    // record, not in the activity ring buffer, so it survives truncation.
+    if (agent.prompt) {
+      this.store.add(
+        "user",
+        agent.prompt,
+        createMessageComponent("user", agent.prompt),
+      );
+    }
     for (const event of activity) this.transcript.apply(event);
     this.list.scrollToBottom();
   }
@@ -111,7 +122,8 @@ export class AgentViewer implements Component {
       agent.status === "running"
         ? accent(`running ${elapsed(agent)}`)
         : dim(`${agent.status} ${elapsed(agent)}`);
-    const label = `Subagent: ${agent.task.split("\n")[0]}`;
+    const kind = agent.background ? "Background subagent" : "Subagent";
+    const label = `${kind}: ${agent.task.split("\n")[0]}`;
     const head = `${chalk.bold(truncateToWidth(label, Math.max(10, width - 24)))}  ${status}`;
 
     const rows: string[] = [head, accent("─".repeat(Math.max(0, width)))];

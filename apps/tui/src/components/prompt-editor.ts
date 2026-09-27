@@ -1,7 +1,16 @@
-import { Editor, decodeKittyPrintable, getKeybindings, matchesKey, type TUI } from "@earendil-works/pi-tui";
+import {
+  Editor,
+  decodeKittyPrintable,
+  getKeybindings,
+  matchesKey,
+  truncateToWidth,
+  visibleWidth,
+  type TUI,
+} from "@earendil-works/pi-tui";
 import type { EditorTheme } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import { palette } from "../palette.js";
+import type { ContextSummary } from "./context-status.js";
 
 /** Image data from clipboard */
 export interface PendingImage {
@@ -89,13 +98,66 @@ export function buildStatusLine(
   indicator: string | null,
   label: string | null,
   indent = 0,
+  context: ContextSummary | null = null,
 ): string | null {
-  const left = indicator ?? "";
+  return layoutStatusLine(width, indicator, label, indent, context)?.line ?? null;
+}
+
+/** Column ranges (0-based, end exclusive) of the clickable context parts. */
+export interface StatusLayout {
+  line: string;
+  tokens?: [number, number];
+  cache?: [number, number];
+}
+
+/**
+ * `buildStatusLine`, plus where the context summary landed so a click on it
+ * can open the matching report. Widths are measured with `visibleWidth`: the
+ * cache ratios arrive already coloured. When space runs out the cache part
+ * goes first, then the right-hand label — the token count is the one number
+ * that answers "how full is the context".
+ */
+export function layoutStatusLine(
+  width: number,
+  indicator: string | null,
+  label: string | null,
+  indent = 0,
+  context: ContextSummary | null = null,
+): StatusLayout | null {
+  const sep = " · ";
+  const build = (withCache: boolean) => {
+    const parts: Array<{ text: string; key?: "tokens" | "cache" }> = [];
+    if (indicator) parts.push({ text: chalk.dim(indicator) });
+    if (context) parts.push({ text: chalk.dim(context.tokens), key: "tokens" });
+    if (context?.cache && withCache) parts.push({ text: context.cache, key: "cache" });
+    const ranges: Partial<Record<"tokens" | "cache", [number, number]>> = {};
+    let col = indent;
+    const texts: string[] = [];
+    parts.forEach((part, i) => {
+      if (i > 0) col += sep.length;
+      const w = visibleWidth(part.text);
+      if (part.key) ranges[part.key] = [col, col + w];
+      col += w;
+      texts.push(part.text);
+    });
+    return { left: texts.join(chalk.dim(sep)), ranges };
+  };
   let right = label ?? "";
-  if (right && indent + left.length + 1 + right.length > width) right = "";
+  const fits = (left: string) =>
+    indent + visibleWidth(left) + (right ? 1 + visibleWidth(right) : 0) <= width;
+  let built = build(true);
+  if (!fits(built.left)) built = build(false);
+  if (right && !fits(built.left)) right = "";
+  let left = built.left;
   if (!left && !right) return null;
-  const gap = Math.max(1, width - indent - left.length - right.length);
-  return chalk.dim(" ".repeat(indent) + left + " ".repeat(gap) + right);
+  if (indent + visibleWidth(left) > width) {
+    left = truncateToWidth(left, Math.max(0, width - indent));
+  }
+  const gap = Math.max(1, width - indent - visibleWidth(left) - visibleWidth(right));
+  return {
+    line: chalk.dim(" ".repeat(indent)) + left + chalk.dim(" ".repeat(gap) + right),
+    ...built.ranges,
+  };
 }
 
 /**
@@ -259,6 +321,15 @@ export class PromptEditor extends Editor {
    * render time, so a mode cycle or model change needs only a re-render.
    */
   statusLabel?: () => string;
+  /** Context usage + cache ratios for the left side of the status row. */
+  statusContext?: () => ContextSummary | null;
+  /**
+   * Where the last render put the status row (index into this component's
+   * lines) and its clickable context parts — read by the click handler.
+   */
+  lastStatus: { row: number; layout: StatusLayout } | null = null;
+  /** Width of the prompt prefix at the last render — the text column. */
+  promptIndent = 0;
   /**
    * Label shown before the glyph: the git branch, or the 1-based turn number
    * outside a repo. A getter so a checkout or a completed turn relabels the
@@ -391,6 +462,7 @@ export class PromptEditor extends Editor {
     const mode = composerMode(this.getText(), this.isProcessing());
     const prefix = promptPrefix(this.promptLabel(), mode);
     this.setPaddingX(prefix.length);
+    this.promptIndent = prefix.length;
 
     const editorLines = super.render(width);
 
@@ -421,13 +493,15 @@ export class PromptEditor extends Editor {
       .map(scrollNotice)
       .filter((n): n is string => n !== null)
       .join(" · ");
-    const status = buildStatusLine(
+    const status = layoutStatusLine(
       width,
       scrolled || this.historyIndicator(),
       this.statusLabel?.() || null,
       prefix.length,
+      this.statusContext?.() ?? null,
     );
-    if (status !== null) out.push(status);
+    this.lastStatus = status ? { row: out.length, layout: status } : null;
+    if (status !== null) out.push(status.line);
 
     // Autocomplete rows follow the bottom border and hang below the status
     // line, unframed and unstyled.

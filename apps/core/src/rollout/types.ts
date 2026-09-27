@@ -108,7 +108,7 @@ export interface FunctionOutputEvent extends BaseEvent {
 
 /** Which gate refused the call. Kept distinct so "the mode forbids this" and
  *  "the user said no" do not read as the same event. */
-export type DenySource = "hook" | "mode" | "rule" | "permission-hook" | "user";
+export type DenySource = "hook" | "mode" | "rule" | "permission-hook" | "user" | "role";
 
 /**
  * A tool call the model made that never ran.

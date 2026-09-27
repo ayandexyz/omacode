@@ -246,6 +246,26 @@ Off by default until the measurement in the spec says the delta is non-negative
 unvalidated model call. Background:
 [trajectory redirection](/internals/agent-loop#trajectory-redirection).
 
+## `tasks`
+
+What happens when a background task finishes: a sub-agent spawned with
+`agent(run_in_background: true)`, or a background shell exiting.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `notify` | boolean | `true` | deliver the result to the agent as a `<task-notification>`: mid-turn at the next tool batch, or by starting a turn if the session is idle |
+
+```json
+{ "tasks": { "notify": false } }
+```
+
+Project file first, then `~/.freecode/settings.json`. `FREECODE_TASK_NOTIFY`
+(`1`/`0`) overrides both. Off means no turn is ever started without your input,
+and `agent(run_in_background)` runs the sub-agent in the foreground instead,
+because the notification is the only way its result reaches the model. A
+background shell still runs; the model checks it with `bashoutput`. Background:
+[Sub-agents](/guides/subagents#background-notifications).
+
 ## Not in this file
 
 | You want | Where it lives |

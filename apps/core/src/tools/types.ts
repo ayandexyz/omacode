@@ -16,6 +16,9 @@ export interface ToolContext {
    * turned off, in the middle of somebody else's turn.
    */
   agentMode?: import("../agent/types.js").AgentMode;
+  /** The spawning run's provider and model — what a subagent inherits. */
+  provider?: string;
+  model?: string;
   fileCache?: FileCache;
   permissionProfile?: PermissionProfile;
   hooks?: unknown;

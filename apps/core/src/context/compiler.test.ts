@@ -78,7 +78,7 @@ test("the static block is exactly the join of its named segments", async () => {
   );
   assert.deepEqual(
     segments.map((s) => s.id),
-    ["system-prompt", "project-instructions", "skills", "memory-guidance"],
+    ["system-prompt", "project-instructions", "skills", "agent-types", "memory-guidance"],
   );
 });
 

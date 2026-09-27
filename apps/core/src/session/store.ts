@@ -84,7 +84,9 @@ export interface SerializedMessage {
   // "steer": the user typed it mid-turn (spec 2026-09-20-pi-parity-plan
   // Phase 1). Persisted as a real user turn for the same reason as the poke;
   // the frontend renders it as a normal user message, badged "steered".
-  synthetic?: "auto_poke" | "steer" | "branch_summary";
+  // "task_notification": a background task finished (agent/task-notify.ts);
+  // the frontend renders a one-line notice, not the XML.
+  synthetic?: "auto_poke" | "steer" | "branch_summary" | "task_notification";
   interrupted?: boolean;
   usage?: MessageUsage;
   /**

@@ -67,12 +67,13 @@ const REQUEST_TIMEOUT_MS = 30_000;
  * it — this one is reset by each stream event instead, and fires only when
  * core has gone completely silent.
  *
- * It has to clear the longest a turn can legitimately be quiet: bash takes a
- * caller-supplied `timeout` with no upper bound (default 60s), and a single
- * tool call emits nothing between `tool_start` and `tool_complete`. Ten
- * minutes leaves that room while still bounding a wedged backend.
+ * It has to clear the longest a turn can legitimately be quiet: a foreground
+ * bash that prints nothing emits nothing between `tool_start` and
+ * `tool_complete`, and bash caps its `timeout` at 10 minutes (`MAX_TIMEOUT`
+ * in core's tools/bash.ts) plus a 3s SIGKILL escalation. Eleven minutes
+ * clears that; anything longer runs in the background and cannot hold a turn.
  */
-const STREAM_IDLE_TIMEOUT_MS = 600_000;
+const STREAM_IDLE_TIMEOUT_MS = 660_000;
 
 // -----------------------------------------------------------------------------
 // Backend supervision

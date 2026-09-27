@@ -7,7 +7,12 @@
 
 import { captureAbProvenance, type AbProvenance } from "./ab-artifacts.js";
 import { loadSuite } from "./dataset.js";
-import { initRunner, runTrial, type RunnerConfig } from "./runner.js";
+import {
+  initRunner,
+  runTrial,
+  shutdownRunner,
+  type RunnerConfig,
+} from "./runner.js";
 import {
   AbError,
   classify,
@@ -127,35 +132,39 @@ export async function runAb(
   const served = { baseline: new Set<string>(), candidate: new Set<string>() };
   const results: AbCaseResult[] = [];
 
-  for (const kase of cases) {
-    const tally: Record<"baseline" | "candidate", TrialResult[]> = {
-      baseline: [],
-      candidate: [],
-    };
-    for (let i = 0; i < options.trials; i++) {
-      // Alternate, so neither side is always the one paying for a cold cache.
-      for (const side of trialOrder(i)) {
-        const variant = side === "baseline" ? options.baseline : options.candidate;
-        const trial = await withEnv(variant.env, () =>
-          runTrial(kase, configs[side]),
-        );
-        tally[side].push(trial);
-        for (const m of trial.echoedModels ?? []) served[side].add(m);
+  try {
+    for (const kase of cases) {
+      const tally: Record<"baseline" | "candidate", TrialResult[]> = {
+        baseline: [],
+        candidate: [],
+      };
+      for (let i = 0; i < options.trials; i++) {
+        // Alternate, so neither side is always the one paying for a cold cache.
+        for (const side of trialOrder(i)) {
+          const variant = side === "baseline" ? options.baseline : options.candidate;
+          const trial = await withEnv(variant.env, () =>
+            runTrial(kase, configs[side]),
+          );
+          tally[side].push(trial);
+          for (const m of trial.echoedModels ?? []) served[side].add(m);
+        }
       }
+      const result = summariseCase(kase, tally, options.trials);
+      const resolved = (side: "baseline" | "candidate") => {
+        const config = kase.model
+          ? configFor(configs[side], { model: kase.model, env: {} })
+          : configs[side];
+        return { provider: config.provider, model: config.model };
+      };
+      result.resolved = {
+        baseline: resolved("baseline"),
+        candidate: resolved("candidate"),
+      };
+      results.push(result);
+      onCase?.(results[results.length - 1]);
     }
-    const result = summariseCase(kase, tally, options.trials);
-    const resolved = (side: "baseline" | "candidate") => {
-      const config = kase.model
-        ? configFor(configs[side], { model: kase.model, env: {} })
-        : configs[side];
-      return { provider: config.provider, model: config.model };
-    };
-    result.resolved = {
-      baseline: resolved("baseline"),
-      candidate: resolved("candidate"),
-    };
-    results.push(result);
-    onCase?.(results[results.length - 1]);
+  } finally {
+    await shutdownRunner();
   }
 
   return {
