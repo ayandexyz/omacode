@@ -179,13 +179,20 @@ const startingTurns = new Set<string>();
 // Task notifications (agent/task-notify.ts) waiting to be delivered. Buffered
 // briefly so a burst — several background agents finishing together — becomes
 // one turn, not one per task.
-const pendingNotifications = new Map<string, string[]>();
+const pendingNotifications = new Map<
+  string,
+  Array<{ text: string; isStale?: () => boolean }>
+>();
 const notificationTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const NOTIFY_COALESCE_MS = 250;
 
-function queueTaskNotification(sessionId: string, text: string): void {
+function queueTaskNotification(
+  sessionId: string,
+  text: string,
+  isStale?: () => boolean,
+): void {
   const list = pendingNotifications.get(sessionId) ?? [];
-  list.push(text);
+  list.push({ text, isStale });
   pendingNotifications.set(sessionId, list);
   scheduleNotificationFlush(sessionId);
 }
@@ -207,8 +214,8 @@ function scheduleNotificationFlush(sessionId: string): void {
  * is gone (ended, deleted, core restarted) drops them — nobody is listening.
  */
 function flushTaskNotifications(sessionId: string): void {
-  const texts = pendingNotifications.get(sessionId);
-  if (!texts?.length) return;
+  const queued = pendingNotifications.get(sessionId);
+  if (!queued?.length) return;
   const session = getSession(sessionId);
   if (!session) {
     pendingNotifications.delete(sessionId);
@@ -219,6 +226,10 @@ function flushTaskNotifications(sessionId: string): void {
     return;
   }
   pendingNotifications.delete(sessionId);
+  // The model may have read the result itself since it was queued (a shell
+  // drained with bashoutput); telling it again would only cost a turn.
+  const texts = queued.filter((n) => !n.isStale?.()).map((n) => n.text);
+  if (texts.length === 0) return;
   const active = activeLoops.get(sessionId);
   if (active) {
     for (const text of texts) {
@@ -247,13 +258,13 @@ function flushTaskNotifications(sessionId: string): void {
   });
 }
 
-setTaskNotificationSink((sessionId, text, notice) => {
+setTaskNotificationSink((sessionId, text, notice, isStale) => {
   BusEvents.stream(sessionId, {
     type: "notice",
     level: "info",
     content: notice,
   });
-  queueTaskNotification(sessionId, text);
+  queueTaskNotification(sessionId, text, isStale);
 });
 
 /**

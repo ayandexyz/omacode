@@ -1,6 +1,9 @@
 // =============================================================================
 // Task notifications — how a background task tells the model it finished.
 //
+// Two kinds: a background sub-agent (`agent(run_in_background)`) and a
+// background shell (`bash(run_in_background)`) exiting.
+//
 // Claude Code's shape (ROADMAP "Background shell completion notifications"):
 // the finished task becomes a `<task-notification>` user-role message. If the
 // session is mid-turn it lands at the next tool-batch boundary (the steer
@@ -20,6 +23,8 @@
 // Defaults ON. Off means no turn is ever started without user input, and
 // `agent(run_in_background)` then runs in the foreground instead: the
 // notification is the only way a background agent's result reaches the model.
+// A background shell still runs with it off — `bashoutput` can read it — the
+// model just has to ask.
 // =============================================================================
 
 import * as fs from "fs";
@@ -29,15 +34,26 @@ import { envFlag } from "./signals/settings.js";
 
 export interface TaskNotification {
   taskId: string;
-  kind: "agent";
+  kind: "agent" | "shell";
   status: "completed" | "failed" | "killed";
-  /** One line: what the task was. */
+  /** One line: what the task was (the agent's task, the shell's command). */
   summary: string;
   /** What the task produced — the text a foreground call would have returned. */
   result: string;
+  /**
+   * Re-checked at delivery: true once the notification would tell the model
+   * nothing new (it drained the shell with bashoutput in the meantime). A
+   * stale notification is dropped rather than buying a redundant turn.
+   */
+  isStale?: () => boolean;
 }
 
-type Sink = (sessionId: string, text: string, notice: string) => void;
+type Sink = (
+  sessionId: string,
+  text: string,
+  notice: string,
+  isStale?: () => boolean,
+) => void;
 
 let sink: Sink | null = null;
 
@@ -65,14 +81,16 @@ export function formatTaskNotification(n: TaskNotification): string {
 
 /** The one-liner the frontend shows where the notification arrived. */
 export function taskNotice(n: TaskNotification): string {
-  const what = n.kind === "agent" ? "Background agent" : "Background task";
-  return `${what} ${n.status}: ${n.summary}`;
+  const what = n.kind === "agent" ? "Background agent" : "Background command";
+  const summary = n.summary.split("\n")[0]!;
+  const short = summary.length > 80 ? `${summary.slice(0, 79)}…` : summary;
+  return `${what} ${n.status}: ${short}`;
 }
 
 /** Hand a finished task to the session. False when nothing can deliver it. */
 export function notifyTask(sessionId: string, n: TaskNotification): boolean {
   if (!sink) return false;
-  sink(sessionId, formatTaskNotification(n), taskNotice(n));
+  sink(sessionId, formatTaskNotification(n), taskNotice(n), n.isStale);
   return true;
 }
 

@@ -19,6 +19,10 @@ import { classifyCommand } from "./output-compress.js";
 import { spawnShell } from "./shells/spawn.js";
 import { getShellRegistry, shellSessionOf } from "./shells/index.js";
 import { BusEvents } from "../bus/index.js";
+import {
+  notifyTask,
+  taskNotificationsEnabled,
+} from "../agent/task-notify.js";
 
 interface BashParams {
   command: string;
@@ -28,6 +32,14 @@ interface BashParams {
 }
 
 const DEFAULT_TIMEOUT = 60_000;
+/**
+ * Ceiling on a foreground command (Claude Code's number). Anything longer must
+ * run in the background: a foreground call holds the whole turn, and one that
+ * prints nothing also trips the TUI's idle deadline (just above this).
+ */
+export const MAX_TIMEOUT = 600_000;
+/** Output tail a completion notification carries; bashoutput has the rest. */
+const NOTIFY_TAIL_CHARS = 4_000;
 
 /**
  * How often a running foreground command flushes its tail to the frontend.
@@ -55,7 +67,8 @@ const bashSchema: JsonSchema = {
     command: { type: "string", description: "The shell command to execute" },
     timeout: {
       type: "number",
-      description: "Timeout in milliseconds (default: 60000)",
+      description:
+        "Timeout in milliseconds (default 60000, max 600000). Longer commands must use run_in_background.",
     },
     workdir: {
       type: "string",
@@ -150,6 +163,9 @@ function startBackground(
   // shells would otherwise never reach /shells.
   const rootId = shellSessionOf(sessionId);
   const registry = getShellRegistry(sessionId);
+  // Read once, at start: the start message has to say whether an exit will be
+  // reported, and the answer must not change under the model mid-run.
+  const notify = taskNotificationsEnabled(ctx.projectPath ?? cwd);
   let shell;
   try {
     shell = registry.start({
@@ -171,6 +187,18 @@ function startBackground(
           status,
           exitCode,
         });
+        // To the session that started it (a subagent's shell tells the
+        // subagent, and is dropped if that subagent is gone). Skipped when
+        // the model already knows — see ShellRegistry.modelKnowsEnd.
+        if (!notify || registry.modelKnowsEnd(id)) return;
+        notifyTask(sessionId, {
+          taskId: id,
+          kind: "shell",
+          status,
+          summary: params.command,
+          result: shellResult(id, exitCode, registry.tail(id, NOTIFY_TAIL_CHARS)),
+          isStale: () => registry.modelKnowsEnd(id),
+        });
       },
     });
   } catch (error) {
@@ -191,7 +219,10 @@ function startBackground(
       output: [
         `Started in the background as ${shell.id}.`,
         "",
-        `Read new output with bashoutput(bash_id: "${shell.id}") — each call returns only what is new.`,
+        notify
+          ? "You will get a <task-notification> with its exit code and output tail when it exits — do not poll or sleep waiting for it. Keep working, or end your turn."
+          : "Completion notifications are off: check on it with bashoutput when you need the result.",
+        `bashoutput(bash_id: "${shell.id}") returns only output that is new since your last call.`,
         `Stop it with killbash(bash_id: "${shell.id}").`,
       ].join("\n"),
       metadata: {
@@ -205,6 +236,17 @@ function startBackground(
   };
 }
 
+/** The <result> of a shell's completion notification. */
+function shellResult(id: string, exitCode: number | null, tail: string): string {
+  return [
+    `Exit code: ${exitCode ?? "none (killed by a signal)"}`,
+    tail.trim()
+      ? `Last output:\n${tail.trimEnd()}`
+      : "(no output)",
+    `bashoutput(bash_id: "${id}") returns everything you have not read yet.`,
+  ].join("\n");
+}
+
 // =============================================================================
 // Foreground mode
 // =============================================================================
@@ -215,7 +257,12 @@ function runForeground(
   cwd: string,
 ): Promise<BashResult> {
   return new Promise((resolve) => {
-    const timeout = params.timeout ?? DEFAULT_TIMEOUT;
+    // Providers send numbers as strings (tool registration checklist).
+    const asked = Number(params.timeout ?? DEFAULT_TIMEOUT);
+    const timeout = Math.min(
+      Number.isFinite(asked) && asked > 0 ? asked : DEFAULT_TIMEOUT,
+      MAX_TIMEOUT,
+    );
     const { child, killTree } = spawnShell(params.command, cwd);
 
     let stdout = "";
@@ -322,7 +369,11 @@ function runForeground(
       };
 
       if (killed) {
-        result.output += `\n\n<bash_metadata>\nCommand timed out after ${timeout}ms (signal sent). If this command is long-running by design, re-run it with run_in_background: true.\n</bash_metadata>`;
+        const capped =
+          asked > MAX_TIMEOUT
+            ? ` — the foreground maximum; the ${asked}ms you asked for is more than a foreground command may take`
+            : "";
+        result.output += `\n\n<bash_metadata>\nCommand timed out after ${timeout}ms${capped} (signal sent). If this command is long-running by design, re-run it with run_in_background: true.\n</bash_metadata>`;
         // Surface the timeout as a failure so the loop sees it as such and
         // doesn't conclude "the command ran successfully, just slowly." The
         // partial output (stdout/stderr captured before the kill) goes into

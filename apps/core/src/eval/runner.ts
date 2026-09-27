@@ -193,6 +193,7 @@ async function runTrialIn(
   const { sessionMemoryFlush } = await import("../session/session-flush.js");
   const { SessionStoreTag } = await import("../effect/context.js");
   const { getAgentRegistry } = await import("../agent/registry/index.js");
+  const { disposeShellRegistry } = await import("../tools/shells/index.js");
 
   const projectPath = sandbox?.dir ?? config.projectPath;
 
@@ -288,11 +289,12 @@ async function runTrialIn(
     unsubscribeQuestions();
     unsubscribePermissions();
     // The scored session never goes through endSession, so a background
-    // subagent (`agent(run_in_background)`) would outlive its trial: spending
+    // subagent or shell (`run_in_background`) would outlive its trial: spending
     // tokens the trial does not count, writing into a sandbox about to be
     // deleted, and holding the process open after the report.
     for (const id of [sessionId, ...earlierSessionIds]) {
       getAgentRegistry().disposeRoot(id);
+      disposeShellRegistry(id);
     }
   };
 

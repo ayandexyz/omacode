@@ -59,6 +59,12 @@ interface Shell {
   droppedChars: number;
   /** Absolute offset the model's `bashoutput` has consumed up to. */
   modelCursor: number;
+  /**
+   * The model already knows how this shell ended: a `bashoutput` returned it
+   * settled, or the model stopped it with `killbash`. A completion
+   * notification would then only buy a redundant turn.
+   */
+  modelKnowsEnd?: boolean;
   kill: (signal: NodeJS.Signals) => void;
   /** Kept on the record so killAll() can fire it too, not just the exit handler. */
   notifyExit?: (id: string, status: ShellStatus, code: number | null) => void;
@@ -152,6 +158,7 @@ export class ShellRegistry {
     if (!shell) return missing();
     const result = this.readFrom(id, shell.modelCursor);
     shell.modelCursor = result.nextCursor;
+    if (result.status !== "running") shell.modelKnowsEnd = true;
     return result;
   }
 
@@ -172,6 +179,23 @@ export class ShellRegistry {
       droppedChars: Math.max(0, shell.droppedChars - cursor),
       nextCursor: end,
     };
+  }
+
+  /**
+   * Whether a completion notification for this shell would tell the model
+   * nothing new: it read the end itself, killed it itself, or the record is
+   * gone (dismissed, or its session ended). Checked at delivery, not at exit —
+   * the model can drain the shell in the moments between.
+   */
+  modelKnowsEnd(id: string): boolean {
+    const shell = this.shells.get(id);
+    return shell ? shell.modelKnowsEnd === true : true;
+  }
+
+  /** The last `maxChars` of buffered output, without touching any cursor. */
+  tail(id: string, maxChars: number): string {
+    const buf = this.shells.get(id)?.buf ?? "";
+    return buf.length > maxChars ? buf.slice(-maxChars) : buf;
   }
 
   list(): ShellSummary[] {
@@ -204,9 +228,10 @@ export class ShellRegistry {
    * the exit handler then settles it as `killed`. Returns false for an unknown
    * id, one already settled, or one a kill is already pending on.
    */
-  kill(id: string): boolean {
+  kill(id: string, byModel = false): boolean {
     const shell = this.shells.get(id);
     if (!shell || shell.status !== "running" || shell.killTimer) return false;
+    if (byModel) shell.modelKnowsEnd = true;
     shell.kill("SIGTERM");
     shell.killTimer = setTimeout(() => {
       shell.kill("SIGKILL");
