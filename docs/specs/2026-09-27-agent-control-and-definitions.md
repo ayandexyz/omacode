@@ -128,9 +128,10 @@ agent_stop({ agent_id })            // interrupt it
 - **A role's tool allowlist is enforced twice:** the tool list the model is
   offered is filtered, and a call to anything else is refused with
   `function.denied` source `role` (`DenySource`).
-- **Not built:** the `/agents` row showing the definition name (§2.6). The
-  registry records it as `agentType`, but the TUI does not render that field.
-  Also not built: `eval ab` (§2.7). Nothing can switch the roster off, so the
+- **`/agents` shows the type (§2.6) without a protocol change:** the existing
+  `AgentSummary.agentType` already carried the definition name, so the row
+  renders it (`explorer · running 12s`) and omits the default `general`.
+- **Not built:** `eval ab` (§2.7). Nothing can switch the roster off, so the
   check was `trajectory --gate` against the pre-change baseline.
 
 ### 2.1 Today

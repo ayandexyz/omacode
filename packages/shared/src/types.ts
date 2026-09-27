@@ -530,6 +530,7 @@ export interface AgentSummary {
   prompt: string;
   /** Spawned with run_in_background: the parent did not wait for it. */
   background: boolean;
+  /** Sub-agent type: a definition name ("general", "explorer", …). */
   agentType: string;
   /** 1 for an agent the main session spawned. */
   depth: number;

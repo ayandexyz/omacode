@@ -21,7 +21,7 @@ const agent = (over: Partial<AgentSummary> = {}): AgentSummary => ({
   task: "Find every call site",
   prompt: "",
   background: false,
-  agentType: "agent",
+  agentType: "general",
   depth: 1,
   status: "running",
   startedAt: Date.now() - 12_000,
@@ -257,4 +257,19 @@ test("an empty roster reports itself so the shell can explain rather than open",
   assert.equal(p.isEmpty(), false);
   assert.equal(p.find("a1")?.task, "Find every call site");
   assert.equal(p.find("nope"), undefined);
+});
+
+test("a row names its sub-agent type, except the default", () => {
+  const p = panel();
+  p.setMaxRows(20);
+  p.setAgents([
+    agent({ id: "a1", task: "Map the auth flow", agentType: "explorer" }),
+    agent({ id: "a2", task: "Fix the typo" }),
+  ]);
+
+  const lines = p.render(80).map((l) => l.replace(ANSI, ""));
+  const explorer = lines.find((l) => l.includes("Map the auth flow"));
+  const general = lines.find((l) => l.includes("Fix the typo"));
+  assert.match(explorer ?? "", /explorer · running \d+s/);
+  assert.doesNotMatch(general ?? "", /general/);
 });

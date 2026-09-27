@@ -21,7 +21,7 @@ export interface AgentSummary {
   prompt: string;
   /** Spawned with run_in_background: the parent did not wait for it. */
   background: boolean;
-  /** Provider override the spawn requested, or "agent" when it took the parent's. */
+  /** Sub-agent type (definition name, e.g. "general", "explorer"); the loop verifier passes its SubagentType. */
   agentType: string;
   /** 1 for an agent the root spawned, 2 for one of its children, and so on. */
   depth: number;
