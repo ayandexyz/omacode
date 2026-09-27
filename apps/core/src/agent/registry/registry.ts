@@ -71,6 +71,12 @@ interface AgentRecord {
   interrupt?: () => void;
   /** `stop()` arrived before the loop existed; fire the interrupt on attach. */
   pendingStop?: boolean;
+  /** Delivers a parent's `agent_send` message into the loop; late-bound. */
+  steer?: (text: string) => void;
+  /** Messages sent before the loop existed, flushed on attach. */
+  pendingMessages: string[];
+  /** Its parent stopped it with `agent_stop`: no completion notice is owed. */
+  stoppedByParent?: boolean;
   onActivity?: (id: string, chunk: string) => void;
   onExit?: (id: string, status: AgentStatus) => void;
 }
@@ -102,6 +108,7 @@ export class AgentRegistry {
       startedAt: Date.now(),
       buf: "",
       droppedChars: 0,
+      pendingMessages: [],
       interrupt: options.interrupt,
       onActivity: options.onActivity,
       onExit: options.onExit,
@@ -147,6 +154,46 @@ export class AgentRegistry {
         // Same as stop(): the row is already settled, nothing to unwind.
       }
     }
+  }
+
+  /**
+   * Late-bind the message handle, like `attachInterrupt`: an `agent_send` that
+   * arrived before the loop existed is delivered here, in order.
+   */
+  attachSteer(id: string, steer: (text: string) => void): void {
+    const record = this.agents.get(id);
+    if (!record) return;
+    record.steer = steer;
+    for (const text of record.pendingMessages.splice(0)) steer(text);
+  }
+
+  /**
+   * A message from the parent to a running agent (`agent_send`). Delivered at
+   * the agent's next steer point; queued if its loop does not exist yet.
+   * False for an unknown or settled agent.
+   */
+  send(id: string, text: string): boolean {
+    const record = this.agents.get(id);
+    if (!record || record.status !== "running") return false;
+    if (record.steer) record.steer(text);
+    else record.pendingMessages.push(text);
+    return true;
+  }
+
+  /** Messages that never reached the loop: it settled before attaching. */
+  takeUndelivered(id: string): string[] {
+    return this.agents.get(id)?.pendingMessages.splice(0) ?? [];
+  }
+
+  /** The parent stopped it itself, so the parent needs no completion notice. */
+  stoppedByParent(id: string): boolean {
+    return this.agents.get(id)?.stoppedByParent === true;
+  }
+
+  /** The last `maxChars` of activity, without touching any cursor. */
+  tail(id: string, maxChars: number): string {
+    const buf = this.agents.get(id)?.buf ?? "";
+    return buf.length > maxChars ? buf.slice(-maxChars) : buf;
   }
 
   /** Mark an agent finished. Idempotent: the first settle wins. */
@@ -204,9 +251,10 @@ export class AgentRegistry {
    * stop is then a no-op and the panel flips immediately. The loop's own
    * completion path finds the record already settled and does nothing.
    */
-  stop(id: string): boolean {
+  stop(id: string, byParent = false): boolean {
     const record = this.agents.get(id);
     if (!record || record.status !== "running") return false;
+    if (byParent) record.stoppedByParent = true;
     if (record.interrupt) {
       try {
         record.interrupt();

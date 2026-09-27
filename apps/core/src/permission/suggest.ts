@@ -16,6 +16,8 @@ const DISPLAY_NAMES: Record<string, string> = {
   bash: "Bash",
   bashoutput: "BashOutput",
   killbash: "KillBash",
+  agent_send: "AgentSend",
+  agent_stop: "AgentStop",
   monitor: "Monitor",
   webfetch: "WebFetch",
   websearch: "WebSearch",

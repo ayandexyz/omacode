@@ -6,6 +6,7 @@ import { EditTool } from "./edit.js";
 import { BashTool } from "./bash.js";
 import { BashOutputTool } from "./bashoutput.js";
 import { KillBashTool } from "./killbash.js";
+import { AgentSendTool, AgentStopTool } from "./agent-control.js";
 import { MonitorTool } from "./monitor.js";
 import { SkillTool } from "./skill.js";
 import { AgentTool } from "./agent.js";
@@ -72,6 +73,8 @@ export const tools = {
   bash: BashTool,
   bashoutput: BashOutputTool,
   killbash: KillBashTool,
+  agent_send: AgentSendTool,
+  agent_stop: AgentStopTool,
   monitor: MonitorTool,
   skill: SkillTool,
   agent: AgentTool,

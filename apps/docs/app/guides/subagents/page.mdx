@@ -149,6 +149,21 @@ or `FREECODE_TASK_NOTIFY=0` (which beats both files). With notifications off,
 says so. The notification is the only way a background result reaches the
 model, so there is no background mode without it.
 
+## Redirecting or stopping a running one
+
+The agent that spawned a background sub-agent can still steer it:
+
+| Tool | What it does |
+| --- | --- |
+| `agent_send(agent_id, message)` | Delivers the message to the sub-agent after its current step, as if you had steered it. Use it for "change of plan: only look at `src/api`". |
+| `agent_stop(agent_id)` | Stops it and returns its last activity (up to 2,000 characters). No notification follows, because the parent asked for the stop. |
+
+Only the direct parent can use them on a given sub-agent; a sub-agent cannot
+reach its parent or a sibling. Both answer with a plain message, not an error,
+for an agent that has already finished or was never theirs. If a message
+arrives too late for the sub-agent to read it, its result says so and repeats
+the message instead of dropping it.
+
 ## Watching them: `/agents`
 
 `/agents` is a roster of every sub-agent under the current session, oldest

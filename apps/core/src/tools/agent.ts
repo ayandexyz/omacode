@@ -305,6 +305,11 @@ async function executeSubagent(
       // Late-bound because the loop cannot exist until the spawn has been
       // allowed; this is what makes `k` in the /agents panel able to stop it.
       agents.attachInterrupt(subagentId, () => subAgentLoop.interrupt());
+      // `agent_send` from the parent lands between tool batches, like a user's
+      // steer at the top level. Framed so the subagent knows who is talking.
+      agents.attachSteer(subagentId, (text) =>
+        subAgentLoop.steer(`Message from the agent that started you:\n${text}`),
+      );
 
       const result = await subAgentLoop.run({
         prompt: params.prompt,
@@ -320,6 +325,15 @@ async function executeSubagent(
       // is a failure to the parent that delegated to it.
       const interrupted = killed();
       const success = result.success && !interrupted;
+      // A message the parent sent that the agent never read: it finished (or
+      // was stopped) before its next steer point. Said, not dropped.
+      const undelivered = [
+        ...subAgentLoop
+          .takeUndeliveredSteers()
+          .filter((s) => s.synthetic === "steer")
+          .map((s) => s.text.replace(/^Message from the agent that started you:\n/, "")),
+        ...agents.takeUndelivered(subagentId),
+      ];
       const message = interrupted ? "interrupted" : result.message;
 
       BusEvents.subagentCompleted(
@@ -349,6 +363,9 @@ async function executeSubagent(
         `Iterations: ${result.iterationCount}`,
         !success && message ? `Reason: ${message}` : "",
         result.content ? `\nOutput:\n${result.content}` : "",
+        undelivered.length
+          ? `\n${undelivered.length} message(s) you sent with agent_send were not delivered — it finished first:\n${undelivered.map((t) => `- ${t}`).join("\n")}`
+          : "",
       ]
         .filter(Boolean)
         .join("\n");
@@ -419,6 +436,9 @@ async function executeSubagent(
   });
   void runToCompletion().then((result) => {
     recordEnd(parentSessionId, subagentId);
+    // Stopped by the parent with agent_stop: it asked for this, and the stop
+    // result already told it what the agent had done.
+    if (agents.stoppedByParent(subagentId)) return;
     const status = killed()
       ? "killed"
       : result.success && result.result.metadata?.success
@@ -441,6 +461,7 @@ async function executeSubagent(
         `Started in the background as ${subagentId}.`,
         "",
         "Its result will arrive as a <task-notification> message when it finishes. Do not poll or wait for it: carry on with other work, or end your turn if there is none.",
+        `To change its instructions while it runs use agent_send(agent_id: "${subagentId}"); to cancel it, agent_stop.`,
       ].join("\n"),
       metadata: { subagentId, background: true },
     },
