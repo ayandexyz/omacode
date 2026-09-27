@@ -251,6 +251,7 @@ export const MonitorTool: Tool<MonitorParams> = buildTool({
   description: `Run a command in the background and get notified about its output WHILE it runs — each line, or each line matching \`pattern\`, arrives as a <task-notification> event (batched per second). One final notification arrives when it ends.
 
 Use it to watch something long and act on it as it happens: a multi-hour test or eval run ("tell me the first failure"), a deploy, a log file (\`tail -f app.log\`).
+- It STARTS the command itself: pass the command you want watched (\`node progress.mjs\`). Do not start it with bash first — a background shell's output cannot be attached to afterwards.
 - Prefer \`bash\` with run_in_background when you only need the result at the end — that reports once, at exit.
 - Give \`pattern\` so only lines worth acting on become events, and include failure signatures (\`FAIL|Error|Traceback\`), not just the success line.
 - It stops itself after \`timeout_ms\` (default 5 min, max 60) or ${MAX_EVENTS} events. Stop it with killbash.`,

@@ -1,0 +1,9 @@
+// Background suite — does the model pick the right way to run something long?
+// NOT part of the gate. Run after touching the bash / monitor descriptions,
+// on a weak and a strong model (see delegation.jsonl for the commands).
+//   - watching a long run for a specific line -> `monitor` with a pattern
+//   - a process that never exits -> bash run_in_background
+// Sandboxed: both tools are mutating, so explore mode would hide them. The
+// runner kills the trial's background shells at cleanup.
+{"id": "background-monitor-first-failure", "prompt": "Start `node progress.mjs` \u2014 it is a long run that goes on for hours. Watch it and tell me as soon as a line containing FAIL shows up; don't wait for it to finish.", "failureCategory": "tool-routing", "whyModelBacked": "Choosing a background mechanism for a run that has not happened yet is a judgement from the tool descriptions against a natural prompt; no deterministic function stands in for it.", "files": {"progress.mjs": "let n = 0;\nsetInterval(() => {\n  n++;\n  console.log(n === 4 ? `FAIL step ${n}: assertion failed` : `step ${n} ok`);\n}, 2000);\n"}, "expectTool": "monitor", "expectInArgs": {"pattern": {"$regex": "FAIL"}}, "expectMaxTurns": 6}
+{"id": "background-dev-server", "prompt": "Start the dev server with `node server.mjs` (it never exits on its own) and confirm it is listening.", "failureCategory": "tool-routing", "whyModelBacked": "Choosing a background mechanism for a run that has not happened yet is a judgement from the tool descriptions against a natural prompt; no deterministic function stands in for it.", "files": {"server.mjs": "import http from 'node:http';\nhttp.createServer((_, res) => res.end('ok')).listen(4317, () => console.log('listening on 4317'));\n"}, "expectTool": "bash", "expectInArgs": {"run_in_background": {"$regex": "^true$"}}, "expectMaxTurns": 6}
