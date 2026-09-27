@@ -129,3 +129,60 @@ test("permissions treat it like bash: blocked in read-only modes, matched by com
   assert.equal(ruleMatches({ tool: "monitor", pattern: "rm:*", decision: "allow" } as never, "monitor", args, "/p"), false);
   assert.equal(suggestRule("monitor", args, "/p"), "Monitor(pnpm eval:*)", "never a bare Monitor");
 });
+
+test("bash_id attaches to a running shell: earlier and later lines count, the shell's own exit reports the end", async () => {
+  const { got, restore } = capture();
+  const sid = "mon-attach";
+  try {
+    const bg = await tools.bash.execute(
+      { command: "echo FAIL early; sleep 1; echo ok; echo FAIL late; sleep 1", run_in_background: true },
+      ctx(sid),
+    );
+    const id = (bg.success && (bg.result as { metadata?: { shellId?: string } }).metadata?.shellId) as string;
+    assert.ok(id, "bash returned a shell id");
+    await new Promise((r) => setTimeout(r, 300)); // "FAIL early" is already buffered
+    const r = await MonitorTool.execute({ bash_id: id, description: "fails", pattern: "FAIL" }, ctx(sid));
+    assert.equal(r.success, true);
+    assert.match(r.success ? r.result.output : "", new RegExp(`Watching ${id}`));
+    await until(() => peekShellRegistry(sid)?.get(id)?.status === "completed");
+    await until(() => got.some((g) => /FAIL late/.test(g.text)));
+    const events = got.filter((g) => /<status>event<\/status>/.test(g.text));
+    assert.match(events.map((e) => e.text).join("\n"), /FAIL early[\s\S]*FAIL late/);
+    assert.equal(got.filter((g) => /Monitor ended/.test(g.text)).length, 0, "no second end notice");
+  } finally {
+    restore();
+    disposeShellRegistry(sid);
+  }
+});
+
+test("bash_id: a guard rail stops watching, never the shell", async () => {
+  const { got, restore } = capture();
+  const sid = "mon-attach-timeout";
+  try {
+    const bg = await tools.bash.execute({ command: "sleep 30", run_in_background: true }, ctx(sid));
+    const id = (bg.success && (bg.result as { metadata?: { shellId?: string } }).metadata?.shellId) as string;
+    await MonitorTool.execute({ bash_id: id, description: "idle", timeout_ms: 200 }, ctx(sid));
+    await until(() => got.some((g) => /Stopped watching/.test(g.text)));
+    assert.match(got.at(-1)!.text, /timed out[\s\S]*still running/);
+    assert.equal(peekShellRegistry(sid)?.get(id)?.status, "running");
+  } finally {
+    restore();
+    disposeShellRegistry(sid);
+  }
+});
+
+test("bash_id: unknown or finished shells are refused; exactly one of command/bash_id", async () => {
+  const r = await MonitorTool.execute({ bash_id: "bash_99", description: "x" }, ctx("mon-attach-missing"));
+  assert.equal(r.success, false);
+  assert.match(r.success ? "" : r.error, /No background shell bash_99/);
+  const v = MonitorTool.validateInput?.({ command: "ls", bash_id: "bash_1", description: "x" } as never);
+  assert.equal((v as { valid: boolean }).valid, false);
+});
+
+test("an attach call gets its own rule, never a bare Monitor that would allow every command", () => {
+  const args = { bash_id: "bash_1", description: "x" };
+  assert.equal(suggestRule("monitor", args, "/p"), "Monitor(bash_id:*)");
+  const rule = { tool: "monitor", pattern: "bash_id:*", decision: "allow" } as never;
+  assert.equal(ruleMatches(rule, "monitor", args, "/p"), true);
+  assert.equal(ruleMatches(rule, "monitor", { command: "rm -rf /", description: "x" }, "/p"), false);
+});

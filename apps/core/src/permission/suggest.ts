@@ -4,7 +4,7 @@
 // =============================================================================
 
 import * as path from "path";
-import { COMMAND_TOOLS, extractTarget } from "./rules.js";
+import { ATTACH_PATTERN, COMMAND_TOOLS, extractTarget } from "./rules.js";
 
 const DISPLAY_NAMES: Record<string, string> = {
   read: "Read",
@@ -47,6 +47,9 @@ export function suggestRule(
   if (COMMAND_TOOLS.has(tool) && target) {
     const prefix = target.trim().split(/\s+/).slice(0, 2).join(" ");
     return `${name}(${prefix}:*)`;
+  }
+  if (COMMAND_TOOLS.has(tool) && typeof args.bash_id === "string") {
+    return `${name}(${ATTACH_PATTERN})`;
   }
   if (tool === "webfetch" && target) {
     try {

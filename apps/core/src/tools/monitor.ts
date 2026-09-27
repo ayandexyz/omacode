@@ -27,7 +27,9 @@ import {
 } from "../agent/task-notify.js";
 
 interface MonitorParams {
-  command: string;
+  command?: string;
+  /** Watch a background shell that is already running instead of starting one. */
+  bash_id?: string;
   description: string;
   pattern?: string;
   timeout_ms?: number;
@@ -56,7 +58,12 @@ const monitorSchema: JsonSchema = {
     command: {
       type: "string",
       description:
-        "Shell command to run and watch, e.g. `pnpm eval coding` or `tail -f build.log`.",
+        "Shell command to run and watch, e.g. `pnpm eval coding` or `tail -f build.log`. Give this or bash_id.",
+    },
+    bash_id: {
+      type: "string",
+      description:
+        "Watch a background shell that is already running (the id bash run_in_background returned) instead of starting a command. Its output so far is checked too.",
     },
     description: {
       type: "string",
@@ -74,15 +81,17 @@ const monitorSchema: JsonSchema = {
     },
     workdir: { type: "string", description: "Working directory." },
   },
-  required: ["command", "description"],
+  required: ["description"],
 };
 
 function validateMonitorInput(
   params: unknown,
 ): { valid: true } | { valid: false; error: string } {
   const p = (params ?? {}) as Record<string, unknown>;
-  if (typeof p.command !== "string" || !p.command.trim()) {
-    return { valid: false, error: "command is required" };
+  const hasCommand = typeof p.command === "string" && p.command.trim() !== "";
+  const hasShell = typeof p.bash_id === "string" && p.bash_id.trim() !== "";
+  if (hasCommand === hasShell) {
+    return { valid: false, error: "give exactly one of command or bash_id" };
   }
   if (typeof p.description !== "string" || !p.description.trim()) {
     return { valid: false, error: "description is required" };
@@ -136,7 +145,15 @@ async function executeMonitor(
   let events = 0;
   let flushTimer: NodeJS.Timeout | undefined;
   let stopReason: string | undefined;
-  let shellId = "";
+  let shellId = params.bash_id?.trim() ?? "";
+  // Attached to someone else's shell, the guard rails stop WATCHING, never the
+  // process: the model started it for its own reasons.
+  let detach: (() => void) | undefined;
+  const stop = (reason: string): void => {
+    stopReason = reason;
+    if (detach) endAttached();
+    else registry.kill(shellId);
+  };
 
   const take = (line: string): void => {
     if (!matches(line)) return;
@@ -168,31 +185,93 @@ async function executeMonitor(
       isStale: () => registry.modelKnowsEnd(shellId),
     });
     if (events >= MAX_EVENTS) {
-      stopReason = `stopped after ${MAX_EVENTS} events — the filter is too loose; narrow \`pattern\` and start a new monitor`;
-      registry.kill(shellId);
+      stop(`stopped after ${MAX_EVENTS} events — the filter is too loose; narrow \`pattern\` and start a new monitor`);
     }
+  }
+
+  const splitLines = (chunk: string): void => {
+    const lines = (partial + chunk).split("\n");
+    partial = lines.pop() ?? "";
+    for (const line of lines) take(line.replace(/\r$/, ""));
+  };
+
+  const drain = (): void => {
+    if (partial) take(partial);
+    partial = "";
+    if (flushTimer) clearTimeout(flushTimer);
+    flush();
+  };
+
+  // Guard rail hit while attached: detach, and say the shell lives on.
+  function endAttached(): void {
+    clearTimeout(timeout);
+    detach?.();
+    detach = undefined;
+    drain();
+    if (registry.modelKnowsEnd(shellId)) return;
+    notifyTask(sessionId!, {
+      taskId: shellId,
+      kind: "monitor",
+      status: "completed",
+      summary: params.description,
+      result: [
+        `Stopped watching ${shellId}: ${stopReason}.`,
+        `The shell is still running; bashoutput(bash_id: "${shellId}") reads it, killbash stops it.`,
+      ].join("\n"),
+      isStale: () => registry.modelKnowsEnd(shellId),
+    });
+  }
+
+  let timeout: NodeJS.Timeout | undefined;
+  const armTimeout = (): void => {
+    timeout = setTimeout(
+      () => stop(`timed out after ${Math.round(timeoutMs / 1000)}s`),
+      timeoutMs,
+    );
+    timeout.unref();
+  };
+
+  if (shellId) {
+    const watched = registry.watch(shellId, {
+      onData: splitLines,
+      // The shell's own exit notification reports the end; only the last
+      // matching lines are ours to deliver, and they go first.
+      onExit: () => {
+        clearTimeout(timeout);
+        detach = undefined;
+        drain();
+      },
+    });
+    if (!watched) {
+      const known = registry.get(shellId);
+      return {
+        success: false,
+        error: known
+          ? `${shellId} has already ended (${known.status}); read it with bashoutput.`
+          : `No background shell ${shellId}. Start the command with monitor({ command }) instead.`,
+      };
+    }
+    detach = watched.stop;
+    armTimeout();
+    // Lines printed before the monitor attached count too: the first FAIL may
+    // already be in the buffer.
+    splitLines(watched.buffered);
+    return started(`Watching ${shellId}`, { attached: true });
   }
 
   let tracked;
   try {
     tracked = trackShell(
-      { command: params.command },
+      { command: params.command! },
       ctx,
       cwd,
       sessionId,
       (reg, options) => reg.start(options),
       {
-        onData: (_id, chunk) => {
-          const lines = (partial + chunk).split("\n");
-          partial = lines.pop() ?? "";
-          for (const line of lines) take(line.replace(/\r$/, ""));
-        },
+        onData: (_id, chunk) => splitLines(chunk),
         onExit: (id, status, exitCode) => {
           clearTimeout(timeout);
-          if (partial) take(partial);
-          partial = "";
-          if (flushTimer) clearTimeout(flushTimer);
-          flush();
+          drain();
           if (registry.modelKnowsEnd(id)) return;
           notifyTask(sessionId, {
             taskId: id,
@@ -215,35 +294,40 @@ async function executeMonitor(
     return { success: false, error: String((error as Error).message ?? error) };
   }
   shellId = tracked.shell.id;
-  const timeout = setTimeout(() => {
-    stopReason = `timed out after ${Math.round(timeoutMs / 1000)}s`;
-    registry.kill(shellId);
-  }, timeoutMs);
-  timeout.unref();
+  armTimeout();
+  return started(`Monitoring as ${shellId}`, { command: params.command });
 
-  return {
+  function started(
+    lead: string,
+    extra: Record<string, unknown>,
+  ): MonitorResult {
+    const attached = extra.attached === true;
+    return {
     success: true,
     result: {
       title: params.description.slice(0, 50),
       output: [
-        `Monitoring as ${shellId}: ${params.description}.`,
+        `${lead}: ${params.description}.`,
         "",
         params.pattern
           ? `Each batch of lines matching /${params.pattern}/ reaches you as a <task-notification> event while it runs; one more arrives when it ends.`
           : "Each batch of output lines reaches you as a <task-notification> event while it runs; one more arrives when it ends.",
-        `It stops by itself after ${Math.round(timeoutMs / 1000)}s or ${MAX_EVENTS} events. Do not poll: carry on, or end your turn.`,
-        `Stop it early with killbash(bash_id: "${shellId}").`,
+        attached
+          ? `It stops watching after ${Math.round(timeoutMs / 1000)}s or ${MAX_EVENTS} events; the shell keeps running. Do not poll: carry on, or end your turn.`
+          : `It stops by itself after ${Math.round(timeoutMs / 1000)}s or ${MAX_EVENTS} events. Do not poll: carry on, or end your turn.`,
+        `Stop ${attached ? "the shell" : "it"} early with killbash(bash_id: "${shellId}").`,
       ].join("\n"),
       metadata: {
         background: true,
         monitor: true,
         shellId,
-        command: params.command,
+        ...extra,
         pattern: params.pattern,
         timeoutMs,
       },
     },
   };
+  }
 }
 
 export const MonitorTool: Tool<MonitorParams> = buildTool({
@@ -251,7 +335,7 @@ export const MonitorTool: Tool<MonitorParams> = buildTool({
   description: `Run a command in the background and get notified about its output WHILE it runs — each line, or each line matching \`pattern\`, arrives as a <task-notification> event (batched per second). One final notification arrives when it ends.
 
 Use it to watch something long and act on it as it happens: a multi-hour test or eval run ("tell me the first failure"), a deploy, a log file (\`tail -f app.log\`).
-- It STARTS the command itself: pass the command you want watched (\`node progress.mjs\`). Do not start it with bash first — a background shell's output cannot be attached to afterwards.
+- Pass \`command\` and it starts the command itself (\`node progress.mjs\`) — the usual way. To watch a background shell already started with bash, pass its \`bash_id\` instead; its output so far is checked too.
 - Prefer \`bash\` with run_in_background when you only need the result at the end — that reports once, at exit.
 - Give \`pattern\` so only lines worth acting on become events, and include failure signatures (\`FAIL|Error|Traceback\`), not just the success line.
 - It stops itself after \`timeout_ms\` (default 5 min, max 60) or ${MAX_EVENTS} events. Stop it with killbash.`,

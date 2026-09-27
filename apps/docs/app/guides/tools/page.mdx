@@ -49,6 +49,13 @@ after 20 notifications (the filter was too loose) or after `timeout_ms`
 It needs notifications on, and its permission rules match on the command
 exactly like `bash`'s (`Monitor(pnpm eval:*)`).
 
+A monitor can also watch a background shell that is already running: pass its
+`bash_id` instead of a `command`. Output printed before it attached is checked
+too. When it hits a limit it stops watching and leaves the shell running, and
+the shell's own exit notification reports the end. Attaching starts no new
+command, so it has its own rule, `Monitor(bash_id:*)`, which never approves a
+command.
+
 | Setting | Effect |
 | --- | --- |
 | `tasks.notify: false` in `settings.json`, or `FREECODE_TASK_NOTIFY=0` | No notifications, so no turn ever starts without you. Background shells still run; the agent has to check them with `bashoutput`. `monitor` is unavailable. |

@@ -13,6 +13,8 @@ import type { PermissionRule, PermissionRuleSet, PermissionSettings } from "./ru
  * never a bare `Monitor` that would approve any command.
  */
 export const COMMAND_TOOLS = new Set(["bash", "monitor"]);
+/** The one rule that allows `monitor({ bash_id })`; no command matches it. */
+export const ATTACH_PATTERN = "bash_id:*";
 
 const PATH_TOOLS = new Set(["read", "ls", "write", "edit", "glob", "grep"]);
 const URL_TOOLS = new Set(["webfetch", "websearch"]);
@@ -78,7 +80,14 @@ export function ruleMatches(
   // MCP tools: argument patterns unsupported in v1 — never match (fail closed)
   if (tool.startsWith("mcp__")) return false;
 
-  if (COMMAND_TOOLS.has(tool)) return matchBash(rule.pattern, args.command);
+  if (COMMAND_TOOLS.has(tool)) {
+    // monitor({ bash_id }) runs nothing new — it watches a shell already
+    // approved — so it has its own rule rather than matching every command.
+    if (args.command === undefined && typeof args.bash_id === "string") {
+      return rule.pattern === ATTACH_PATTERN;
+    }
+    return matchBash(rule.pattern, args.command);
+  }
   if (PATH_TOOLS.has(tool)) {
     return matchPath(rule.pattern, extractTarget(tool, args), projectRoot);
   }

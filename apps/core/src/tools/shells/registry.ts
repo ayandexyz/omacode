@@ -45,6 +45,12 @@ export interface ShellStartOptions {
   onExit?: (id: string, status: ShellStatus, exitCode: number | null) => void;
 }
 
+/** A later subscriber to a running shell — `monitor({ bash_id })`. */
+export interface ShellWatcher {
+  onData: (chunk: string) => void;
+  onExit: (status: ShellStatus, exitCode: number | null) => void;
+}
+
 interface Shell {
   id: string;
   command: string;
@@ -68,6 +74,7 @@ interface Shell {
   kill: (signal: NodeJS.Signals) => void;
   /** Kept on the record so killAll() can fire it too, not just the exit handler. */
   notifyExit?: (id: string, status: ShellStatus, code: number | null) => void;
+  watchers: Set<ShellWatcher>;
   /** Set by kill(): SIGKILL escalation pending; also marks the exit as ours. */
   killTimer?: NodeJS.Timeout;
   closeGrace?: NodeJS.Timeout;
@@ -126,6 +133,7 @@ export class ShellRegistry {
       modelCursor: 0,
       kill: killTree,
       notifyExit: options.onExit,
+      watchers: new Set(),
     };
     this.shells.set(id, shell);
 
@@ -137,6 +145,7 @@ export class ShellRegistry {
         shell.droppedChars += drop;
       }
       options.onData?.(id, chunk);
+      for (const w of shell.watchers) w.onData(chunk);
     };
 
     if (initialOutput) append(initialOutput);
@@ -149,6 +158,7 @@ export class ShellRegistry {
       shell.status = status;
       shell.exitCode = code;
       shell.endedAt = Date.now();
+      this.endWatchers(shell);
       options.onExit?.(id, status, code);
     };
 
@@ -212,6 +222,22 @@ export class ShellRegistry {
   modelKnowsEnd(id: string): boolean {
     const shell = this.shells.get(id);
     return shell ? shell.modelKnowsEnd === true : true;
+  }
+
+  /**
+   * Subscribe to a RUNNING shell's later output and its end. The buffered
+   * output so far is returned rather than replayed, so the caller decides what
+   * to do with it. Undefined for an unknown or settled shell. The returned
+   * `stop` detaches without touching the process.
+   */
+  watch(
+    id: string,
+    watcher: ShellWatcher,
+  ): { buffered: string; stop: () => void } | undefined {
+    const shell = this.shells.get(id);
+    if (!shell || shell.status !== "running") return undefined;
+    shell.watchers.add(watcher);
+    return { buffered: shell.buf, stop: () => shell.watchers.delete(watcher) };
   }
 
   /** The last `maxChars` of buffered output, without touching any cursor. */
@@ -300,7 +326,14 @@ export class ShellRegistry {
     this.clearTimers(shell);
     shell.status = "killed";
     shell.endedAt = Date.now();
+    this.endWatchers(shell);
     shell.notifyExit?.(shell.id, "killed", null);
+  }
+
+  /** Watchers hear the end first, so their last lines precede the exit notice. */
+  private endWatchers(shell: Shell): void {
+    for (const w of shell.watchers) w.onExit(shell.status, shell.exitCode);
+    shell.watchers.clear();
   }
 
   private clearTimers(shell: Shell): void {
