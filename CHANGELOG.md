@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.42.0
+
+Background work. A subagent or a shell no longer has to hold the turn: `agent(run_in_background: true)` and `bash(run_in_background: true)` return at once, and the result comes back as a task notification — steered into the running turn, or starting one if the session is idle. The parent can steer or stop a running subagent, pick its role from Claude Code-format agent files, and continue a finished one. On the memory side, automatic recall is now measured rather than assumed, and the retrieval judge is off by default because the measurement found it neutral.
+
+### Added
+
+- **Background subagents with task notifications** (`6b4a6201`, `0fe104e0`). `agent(run_in_background: true)` returns immediately; the result reaches the spawner as a `synthetic: "task_notification"` user message. Mid-turn it rides `AgentLoop.steer()`; idle, it starts a turn (250ms coalesce). On by default (`tasks.notify`, `FREECODE_TASK_NOTIFY`); off ⇒ background falls back to foreground. `/agents` shows the spawn prompt as the viewer's first message.
+- **Background shells notify on exit** (`53b78a0c`). Exit code + 4k tail as a `<task-notification>`, skipped when the model already saw the end (drained via `bashoutput`, or killed it itself).
+- **Foreground bash that outlives its timeout moves to the background** (`f05d0a77`) instead of being killed, keeping the output so far. `timeout` is capped at 10 minutes; a model that set a lower timeout itself still gets a kill, now with the partial output and advice.
+- **`monitor` tool** (`44fef65a`, `2022a02b`, `05f57aa9`). Runs a command in the background and turns its output lines (or `pattern` matches) into notifications while it runs — batched per second, self-stopping at 20 events or `timeout_ms`. `monitor({ bash_id })` attaches to an already-running shell; its guard rails then detach, never kill.
+- **Read-only `agent` calls in one response run concurrently** (`44fef65a`).
+- **`agent_send` / `agent_stop`** (`d0b2fa45`). The direct parent steers or cancels a running subagent. A message the subagent never read is listed in its result, never dropped. Spec: `docs/specs/2026-09-27-agent-control-and-definitions.md`.
+- **Sub-agent types** (`000a0119`, `c7b81760`). `agent({ subagent_type })` picks a role from Claude Code-format `*.md` files: built-in (general / explorer / reviewer) → `~/.claude/agents` → `~/.freecode/agents` → project `.claude/agents` → project `.freecode/agents`, later wins. A role's `tools` allowlist narrows the mode's tool set, never widens it. `freecode agents list` prints the resolved roster; `/agents` rows show the type. `FREECODE_CLAUDE_CODE_AGENTS=0` skips the `.claude` ones.
+- **Continue a finished subagent** (`e05521b3`). `agent({ continue: <id> })` forks its session and runs it with the config recorded at spawn, so it cannot change role or authority. The in-process roster is the lookup, so it does not survive a restart.
+- **Background ledger** (`44fef65a`). Background agents, shells and monitors still running when a session ends or the core exits are reported as `lost` on resume, in the next turn — never a turn of their own.
+- **Hooks mirror questions, permissions and turn ends into agent-fold** (`526fc511`).
+- **Memory cost accounting** (`0300299f`, `6ac1653d`, `fcab5e04`, `07c65d8f`, `1b825553`, `0bf5c0e7`, `0eeed655`). Auxiliary model calls (extraction, judge, consolidation) are recorded and included in trace cost; request-level memory exposure and preparation state are logged.
+- **Memory benchmarks and suites** (`dd2083d4`, `3380ae09`, `f135976d`, `b729cc8e`, `b6e05376`, `151d9af5`, `bd364abc`, `edf063c7`). `pnpm bench:inject` scores what the model actually receives; `pnpm eval ab memory` pairs recall on/off; multi-session, consolidation, long-horizon and LongMemEval-S adapted suites. Spec: `docs/specs/2026-09-25-memory-efficiency-and-graph-explorer.md`.
+- **Delegation eval suite** (`6bf33ea2`) for agent-tool routing — it found and fixed three harness bugs.
+
+### Changed
+
+- **Memory retrieval judge is off by default** (`04aca9b9`). The fixed judge measured neutral against no judge. Enable with `memory.retrievalJudge: true` or `FREECODE_DISABLE_MEMORY_JUDGE=0`.
+- **Context/cache readout moved into the status row** (`b7076a66`) under the input, instead of a top-right overlay that covered conversation text.
+- **Turns started by the core** (a notification arriving while idle) get a spinner, interrupt and steering in the TUI (`14ac7ea0`).
+
+### Fixed
+
+- **Rendered memory context is capped** (`37b2a9e7`), and injected memories stay consistent with the store after a save or delete (`d66ceb94`).
+- **Query embeddings are no longer padded to 512 tokens** (`21d3bce1`).
+- **The retrieval judge works on the first request** (`9c957bb2`).
+
+### Notes
+
+Automatic memory recall measured 23–24/24 vs 12–13/24 without it, at −45% cost per passed task; `memory-sessions` shows learning across sessions, 13/15 vs 4/15 at 3.9% extraction cost. Judged-gate calibration runs on Gemini recorded GATE OPEN (`c0ee3495`). Tests: core 1697/1697, TUI 318/318, typecheck clean.
+
 ## v0.41.0
 
 Auto-poke no longer treats a list of suggestions as authorization, and the Omarchy-style `/` menu lands. A status question like "what's left?" became implementation: the model recorded suggested fixes as pending todos and the loop read the open list as a reason to continue. Suggested work was being treated as authorized work. The slash menu gets a card layout that matches the Omarchy theme across `/`, `/model`, and `/web`.
