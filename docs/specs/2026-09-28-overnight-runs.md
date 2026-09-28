@@ -824,9 +824,30 @@ Each phase is shippable and revertible on `autonomous`.
   of appearing redacted. `scrubFields` now walks the record's string fields, so
   the user is still told something needs them.
 
-**Phase 4 — Frontends.** `/night` in the TUI (start with the same flags, show
-live status from the manifest, open the report); notification on finish via the
-existing Notification hook. Frontends only read the manifest/report over IPC.
+**Phase 4 — Frontends.** **Built 2026-09-28**, with one deliberate deviation.
+`/night` in the TUI (live status from the manifest, open the report, stop a
+running night); notification on finish via the existing Notification hook.
+Frontends only read the manifest/report over IPC — `night.list|report|stop`,
+which boot none of the backend, because reading a finished run must not start
+providers and MCP servers.
+
+**Deviation — the panel does not START a run.** This phase's line said "start
+with the same flags", and it should not: a night started from the TUI would put
+an unattended agent loop inside the daemon serving the user's own session,
+sharing its permission surface and competing for the same provider — and
+detached execution is deliberately Phase 5. The empty panel prints the command
+to run instead, which is the whole answer while v1 is a foreground process.
+
+`night.list` counts `needsHuman` in CORE rather than the frontend: what "needs
+you" means is the run's business, and four clients must not each decide it. In
+the card that count outranks everything, including commits — a night with nine
+commits and one unanswered question is, to the user, a night with a question in
+it. The report opens as a markdown MESSAGE rather than a new viewer component:
+it is prose read once and scrolled, which the message list already does, and it
+stays in the transcript to refer back to.
+
+- *Verify:* `night-panel.test.ts` (11) + the three IPC methods exercised against
+  a real `handleRequest`. Core 1815, TUI 329, both green.
 
 **Phase 5 — Only if asked.** Detached execution (old spec §4.4a), OS sandbox for
 bash, conventional-commit preset, scheduled starts.

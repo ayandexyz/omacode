@@ -488,6 +488,22 @@ export const METHODS = {
     params: { sessionId: "" as string, agentId: "" as string },
     result: { removed: false as boolean },
   },
+  // Overnight runs (`freecode night`). A night is a SEPARATE foreground
+  // process, so these are pure reads of what it left on disk — the daemon
+  // never runs one. `night.stop` writes a flag the running process picks up at
+  // its next iteration boundary.
+  "night.list": {
+    params: {},
+    result: [] as import("../types.js").NightRunSummary[],
+  },
+  "night.report": {
+    params: { runId: undefined as string | undefined },
+    result: { markdown: "" as string, runId: "" as string },
+  },
+  "night.stop": {
+    params: { runId: "" as string },
+    result: { stopped: false as boolean },
+  },
   "skills.list": {
     params: { projectPath: undefined as string | undefined },
     result: [] as {
@@ -849,6 +865,9 @@ export const REQUIRED_PARAMS: Record<
   "agents.output": { sessionId: "string", agentId: "string" },
   "agents.stop": { sessionId: "string", agentId: "string" },
   "agents.remove": { sessionId: "string", agentId: "string" },
+  "night.list": {},
+  "night.report": {},
+  "night.stop": { runId: "string" },
   "skills.list": {},
   "plugins.list": {},
   "mcp.status": {},

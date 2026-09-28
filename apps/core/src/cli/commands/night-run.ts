@@ -433,8 +433,26 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
     });
   }
 
-  // ---- Exit summary (§4.10 v0: terminal only; report.md is Phase 3).
   const decisions = store.readDecisions(runId);
+  const needsHumanCount = decisions.filter((d) => d.kind === "needs_human").length;
+
+  // The night is over and nobody has been watching. Fire the existing
+  // Notification hook so a user who wired one up (desktop toast, phone push)
+  // learns it ended without having to check the terminal. Best-effort: a
+  // failing hook must not change the run's exit.
+  try {
+    const { runNotificationHooks } = await import("../../hooks/Notification.js");
+    await runNotificationHooks(
+      `night ${runId} ended: ${result.stopReason} — ` +
+        `${result.commits.length} commit${result.commits.length === 1 ? "" : "s"} on ${branch}` +
+        `${needsHumanCount > 0 ? `, ${needsHumanCount} thing(s) need you` : ""}`,
+      { sessionId: runId, projectPath, turnCount: result.iterations },
+    );
+  } catch {
+    // A notification nobody receives is not worth failing a night over.
+  }
+
+  // ---- Exit summary (§4.10 v0: terminal only; report.md is Phase 3).
   const needsHuman = decisions.filter((d) => d.kind === "needs_human");
   const denied = decisions.filter((d) => d.kind === "denied");
   const asked = decisions.filter((d) => d.kind === "asked");

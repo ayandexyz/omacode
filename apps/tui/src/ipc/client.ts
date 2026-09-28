@@ -27,6 +27,7 @@ import type {
   ShellSummary,
   ShellOutputResult,
   AgentSummary,
+  NightRunSummary,
   AgentOutputResult,
 } from "@thisisayande/freecode-shared";
 
@@ -1023,6 +1024,28 @@ export async function shellsRemove(
  * session — core resolves the tree, so the TUI never handles a subagent's
  * synthetic session id except as an opaque row key.
  */
+// ---- Overnight runs. A night is a separate process; these only read what it
+// left on disk, and ask a running one to stop at its next boundary.
+export async function nightList(): Promise<NightRunSummary[]> {
+  return (await sendRequest("night.list", {})) as NightRunSummary[];
+}
+
+export async function nightReport(
+  runId?: string,
+): Promise<{ runId: string; markdown: string }> {
+  return (await sendRequest("night.report", { runId })) as {
+    runId: string;
+    markdown: string;
+  };
+}
+
+export async function nightStop(runId: string): Promise<boolean> {
+  const result = (await sendRequest("night.stop", { runId })) as {
+    stopped: boolean;
+  };
+  return result.stopped;
+}
+
 export async function agentsList(sessionId: string): Promise<AgentSummary[]> {
   return (await sendRequest("agents.list", { sessionId })) as AgentSummary[];
 }

@@ -106,6 +106,18 @@ const agentsCommand: Command = {
   },
 };
 
+const nightCommand: Command = {
+  name: "night",
+  description: "Overnight runs — read a morning report, stop a running night",
+  execute: async (_args, ctx) => {
+    if (ctx.showNightPanel) {
+      await ctx.showNightPanel();
+    } else {
+      ctx.showMessage("Night panel unavailable in this context.");
+    }
+  },
+};
+
 const effortCommand: Command = {
   name: "effort",
   description: "Set reasoning effort (low/medium/high/xhigh/max)",
@@ -328,6 +340,7 @@ export function registerBuiltInCommands(): void {
   registerCommand(mcpCommand);
   registerCommand(shellsCommand);
   registerCommand(agentsCommand);
+  registerCommand(nightCommand);
   registerCommand(effortCommand);
   registerCommand(resumeCommand);
   registerCommand(compactCommand);
