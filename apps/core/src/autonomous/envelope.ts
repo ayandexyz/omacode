@@ -109,7 +109,19 @@ export function decideUnattendedAsk(opts: {
   const tool = toolName.toLowerCase();
 
   // A command's "target" is the command text, not a path — judging it as one
-  // would refuse every `pnpm test`. Commands are bounded by the deny list.
+  // would refuse every `pnpm test`. Commands are bounded by the deny list, plus
+  // the chained-command check below.
+  if (COMMAND_TOOLS.has(tool)) {
+    const evaded = deniedSegment(args.command);
+    if (evaded) {
+      return {
+        allowed: false,
+        rule: evaded,
+        reason: `\`${evaded}\` is refused for this run, however it is spelled. ${REFUSAL_TEXT}`,
+      };
+    }
+  }
+
   if (!COMMAND_TOOLS.has(tool)) {
     const target = extractTarget(tool, args);
     if (target && MUTATORS.has(tool) && touchesGitDir(target)) {
@@ -136,6 +148,88 @@ export function decideUnattendedAsk(opts: {
 const PATH_TOOLS = new Set(["write", "edit", "read", "ls", "glob", "grep"]);
 const looksLikePath = (tool: string): boolean => PATH_TOOLS.has(tool);
 const MUTATORS = new Set(["write", "edit"]);
+
+/**
+ * The verbs the deny rules above forbid, as bare prefixes. Derived from the
+ * rules so the two cannot drift.
+ */
+const DENIED_PREFIXES = ENVELOPE_DENY_RULES.map((rule) =>
+  rule.replace(/^Bash\(/, "").replace(/:\*\)$/, "").trim(),
+);
+
+/** `&&`, `||`, `;`, `|`, newline, and command substitution. */
+const SEGMENT_SPLIT = /\|\||&&|;|\||\n|`|\$\(|\)/;
+
+/** `FOO=bar` — a leading environment assignment, not the command. */
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * Strip what a prefix rule cannot see past, so the verb lands at the front:
+ * leading environment assignments and an `env` wrapper
+ * (`GIT_AUTHOR_NAME=x env git commit` → `git commit`), then the directory of a
+ * program path (`/usr/bin/git commit` → `git commit`).
+ *
+ * Only leading tokens are touched — a path or an `=` in an ARGUMENT is data,
+ * and rewriting it would change which commands match.
+ */
+function normalizeSegment(segment: string): string {
+  let rest = segment.trim();
+  for (;;) {
+    const space = rest.search(/\s/);
+    if (space === -1) break;
+    const head = rest.slice(0, space);
+    if (!ENV_ASSIGNMENT.test(head) && head !== "env") break;
+    rest = rest.slice(space + 1).trimStart();
+  }
+  const space = rest.search(/\s/);
+  const head = space === -1 ? rest : rest.slice(0, space);
+  if (!head.includes("/")) return rest;
+  const bare = head.slice(head.lastIndexOf("/") + 1);
+  return space === -1 ? bare : bare + rest.slice(space);
+}
+
+/**
+ * The denied verb inside a command, however it is spelled.
+ *
+ * Both spellings here were found by `evals/night.jsonl` on its first two runs,
+ * with MiniMax-M3 working around a refused `git commit`:
+ *
+ * 1. **Chained.** `git init && git config … && git add -A && git commit -am '…'`
+ *    — `docs/DECISIONS.md` records that a bash prefix rule deliberately refuses
+ *    to match a compound command, so `Bash(npm:*)` can never approve
+ *    `npm test && rm -rf /`. That is the right failure direction for an ALLOW
+ *    rule and the wrong one for a DENY rule, which then matches nothing and
+ *    lets the whole chain through.
+ * 2. **Path-qualified.** `/usr/bin/git commit -m '…'` — a prefix rule compares
+ *    from the first character, so the same verb behind its absolute path is a
+ *    different string.
+ * 3. **Env-prefixed.** `GIT_AUTHOR_NAME="freecode" GIT_AUTHOR_EMAIL="…" git
+ *    commit -m '…'` — same story, with assignments in front of the verb.
+ *
+ * Fixed here rather than in `rules.ts`: the recorded decision is about allow
+ * semantics and is load-bearing there. This is the envelope's own problem,
+ * because it is the only caller whose rules are exclusively denials.
+ *
+ * Still not a sandbox (see the header). `eval "$(echo git push)"`, a shell
+ * alias, or a script that wraps the verb all defeat it. It closes the routes a
+ * model actually takes when told no, not the ones an adversary would.
+ */
+function deniedSegment(command: unknown): string | undefined {
+  if (typeof command !== "string") return undefined;
+  for (const raw of command.split(SEGMENT_SPLIT)) {
+    const segment = normalizeSegment(raw);
+    for (const prefix of DENIED_PREFIXES) {
+      if (segment === prefix) return prefix;
+      if (
+        segment.startsWith(prefix) &&
+        /\s/.test(segment[prefix.length] ?? " ")
+      ) {
+        return prefix;
+      }
+    }
+  }
+  return undefined;
+}
 
 // Reading `.git/` is fine (a model may want the log); writing into it is how a
 // model would rewrite the history the orchestrator owns.
