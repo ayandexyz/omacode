@@ -286,15 +286,19 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
       `Error: --fallback-model "${argv.fallbackModel}" must be provider/model.`,
     );
   }
-  // An unbounded night has to be a choice, not a default (§4.12).
+  // An unbounded night has to be a choice, not a default (§4.12). A resume
+  // needs one too: the first leg's limits are not reloaded (its --until is
+  // usually already past by the time anyone resumes), so without a flag here
+  // the resumed leg would have no ceiling at all.
   if (
-    !resuming &&
     argv.maxIterations === undefined &&
     argv.maxUsd === undefined &&
     until === undefined
   ) {
     fail(
-      "Error: a night run needs a limit. Pass at least one of --until <07:00|8h>, --max-iterations <n>, --max-usd <n>.",
+      resuming
+        ? "Error: resuming needs a limit for this leg. Pass at least one of --until <07:00|8h>, --max-iterations <n> (counted from here), --max-usd <n>."
+        : "Error: a night run needs a limit. Pass at least one of --until <07:00|8h>, --max-iterations <n>, --max-usd <n>.",
     );
   }
 

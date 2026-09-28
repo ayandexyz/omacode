@@ -1176,7 +1176,7 @@ export const methodHandlers: Record<
   // `sessionId` is the ROOT session; the registry resolves the tree, so a
   // frontend never has to learn a subagent's synthetic id to list one.
   // ---- Overnight runs. Pure reads of what a separate `freecode night`
-  // process left on disk; the daemon never runs one (detach is Phase 5).
+  // process left on disk; the daemon never runs one, detached or not.
   "night.list": async (): Promise<unknown[]> => {
     const { listNightRuns } = await import("./autonomous/night-ops.js");
     const { readDecisions } = await import("./autonomous/night-store.js");

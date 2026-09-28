@@ -85,6 +85,8 @@ test("a failing pre-commit hook keeps the work in the tree", async () => {
   const git = createGitOps(repo);
   const hooks = path.join(repo, ".git", "hooks");
   fs.mkdirSync(hooks, { recursive: true });
+  // A global `core.hooksPath` would otherwise win and the hook never runs.
+  execFileSync("git", ["config", "core.hooksPath", hooks], { cwd: repo, stdio: "pipe" });
   fs.writeFileSync(path.join(hooks, "pre-commit"), "#!/bin/sh\necho nope >&2\nexit 1\n", {
     mode: 0o755,
   });
