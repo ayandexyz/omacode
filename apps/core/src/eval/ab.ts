@@ -74,6 +74,8 @@ export const VARIABLE_ENV_KEYS = [
   "FREECODE_HILLCLIMB_GATE",
   // Read per call in compileDynamicContext and loadSystemPrompt.
   "FREECODE_CONTEXT_FRAMING",
+  // Read per call in modelPromptOverlay (session/model-prompt.ts).
+  "FREECODE_MODEL_OVERLAY",
 ] as const;
 
 /**

@@ -45,7 +45,7 @@ test("compileSystemBlocks starts the static block with the system prompt", async
   assert.ok(blocks[0].text.startsWith(expected.slice(0, 40)));
 });
 
-test("compileSystemBlocks uses one system prompt regardless of model", async () => {
+test("compileSystemBlocks keeps one canonical prompt regardless of model", async () => {
   const project = tmpDir();
   const compiler = new PromptCompiler(project, "test-project", "build");
   const lead = (await loadSystemPrompt()).trim().slice(0, 40);
@@ -56,6 +56,24 @@ test("compileSystemBlocks uses one system prompt regardless of model", async () 
     // ...but grounded with that model's identity to avoid misidentification.
     assert.ok(blocks[0].text.includes(`powered by the model named ${model}`));
   }
+});
+
+test("compileSystemBlocks adds the MiniMax family overlay", async () => {
+  const project = tmpDir();
+  const compiler = new PromptCompiler(project, "test-project", "build");
+
+  const direct = await compiler.compileSystemBlocks("minimax", "MiniMax-M3");
+  assert.match(direct[0].text, /# MiniMax execution guidance/);
+  assert.match(direct[0].text, /one-off tool interaction/);
+
+  const gateway = await compiler.compileSystemBlocks(
+    "openrouter",
+    "minimax/minimax-m3",
+  );
+  assert.match(gateway[0].text, /# MiniMax execution guidance/);
+
+  const other = await compiler.compileSystemBlocks("anthropic", "claude-sonnet");
+  assert.doesNotMatch(other[0].text, /# MiniMax execution guidance/);
 });
 
 test("the static block is exactly the join of its named segments", async () => {

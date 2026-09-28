@@ -8,6 +8,7 @@ import type { AgentMode } from "../agent/types.js";
 import type { SystemBlock } from "../providers/types.js";
 import { compileInstructionsSection } from "./instructions.js";
 import { loadSystemPromptFor } from "../session/prompt.js";
+import { modelPromptOverlay } from "../session/model-prompt.js";
 import { renderAvailableSkillsSection } from "../skills/prompt.js";
 import { buildMemoryGuidanceBlock } from "../memory/mem-prompt.js";
 import { renderAgentTypesSection } from "../agent/definitions/index.js";
@@ -150,6 +151,7 @@ ${tree}`;
         label: "System prompt",
         text: joinSections([
           await loadSystemPromptFor(this.projectPath),
+          modelPromptOverlay(provider, model),
           modelIdentity,
           this.compileSystemPrompt(),
         ]),
