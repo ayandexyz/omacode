@@ -21,6 +21,7 @@ import { webCommand } from "./commands/web.js";
 import { mobileCommand } from "./commands/mobile.js";
 import { serveCommand } from "./commands/serve.js";
 import { runCommand } from "./commands/run.js";
+import { nightCommand } from "./commands/night.js";
 import { traceCommand } from "./commands/trace.js";
 import { checkpointCommand } from "./commands/checkpoint.js";
 import { agentsCommand } from "./commands/agents.js";
@@ -96,6 +97,7 @@ export function createCli(extraCommands: CommandModule[] = []) {
     .command(mobileCommand)
     .command(serveCommand)
     .command(runCommand)
+    .command(nightCommand as CommandModule)
     .command(traceCommand as CommandModule)
     .command(checkpointCommand as CommandModule)
     .command(agentsCommand as CommandModule)

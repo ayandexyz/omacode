@@ -147,3 +147,105 @@ export interface RunManifest {
 
   taskCardCount: number;
 }
+
+// =============================================================================
+// Overnight runs (`freecode night`) — spec 2026-09-28-overnight-runs.md.
+// A run is a sequence of ITERATIONS: each one a fresh session doing one small
+// verifiable step, ending in a `finish_iteration` call. The orchestrator, not
+// the model, commits, resets, and decides when the night is over.
+// =============================================================================
+
+/** What the model reports through `finish_iteration` (§4.4). */
+export interface FinishIterationResult {
+  /** Meaningful progress was made. `false` ⇒ the orchestrator discards the tree. */
+  success: boolean;
+  /** One sentence; becomes the commit subject. */
+  summary: string;
+  keyChanges: string[];
+  keyLearnings: string[];
+  decisions: IterationDecision[];
+  needsHuman: string[];
+  /** The objective is fully met — end the run, don't just end the iteration. */
+  shouldStop?: boolean;
+}
+
+export interface IterationDecision {
+  question: string;
+  choice: string;
+  why: string;
+  reversible: boolean;
+}
+
+/**
+ * Why an iteration did not produce a commit. `no_finish` is the one to watch:
+ * it means the model stopped without calling the finish tool (§6 failure mode 1).
+ */
+export type IterationFailureReason =
+  | "reported_failure"
+  | "no_finish"
+  | "no_op"
+  | "turn_cap"
+  | "stuck"
+  | "timeout"
+  | "commit_failed"
+  | "provider"
+  | "quota"
+  | "auth"
+  | "interrupted";
+
+export interface IterationRecord {
+  kind: "iteration";
+  n: number;
+  sessionId: string;
+  startedAt: number;
+  endedAt: number;
+  /** Committed ⇒ the step is on the branch. */
+  commit?: string;
+  failure?: IterationFailureReason;
+  summary?: string;
+  filesChanged?: number;
+  usd?: number;
+  turns: number;
+}
+
+/** A denial or a self-answered question, for the morning report (§4.5, §4.6). */
+export type Decision =
+  | { kind: "asked"; iteration: number; at: number; questions: string[] }
+  | {
+      kind: "decided";
+      iteration: number;
+      at: number;
+      question: string;
+      choice: string;
+      why: string;
+      reversible: boolean;
+    }
+  | {
+      kind: "denied";
+      iteration: number;
+      at: number;
+      tool: string;
+      target?: string;
+      rule: string;
+    }
+  | { kind: "needs_human"; iteration: number; at: number; item: string };
+
+/**
+ * The seam between the agent loop and an unattended run. The loop knows only
+ * this interface: it consults `decideAsk` instead of prompting a human, hands
+ * it to tools through `ToolContext`, and ends the run once `finish` is set.
+ * Nothing here is visible in an attended session.
+ */
+export interface UnattendedContext {
+  /** 1-based iteration number, for every record written. */
+  iteration: number;
+  /** Set by `finish_iteration`. The loop ends the run after that batch. */
+  finish?: FinishIterationResult;
+  /** Answer a permission `ask` without a human (§4.6). */
+  decideAsk(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): { allowed: boolean; reason?: string };
+  /** Record a self-answered question or a refusal for the report. */
+  record(decision: Decision): void;
+}

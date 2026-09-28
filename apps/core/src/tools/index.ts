@@ -18,6 +18,7 @@ import { LspTool } from "./lsp.js";
 import { LsTool } from "./ls.js";
 import { OutputTool } from "./output.js";
 import { MemoryTool } from "./memory.js";
+import { FinishIterationTool } from "./finish-iteration.js";
 import {
   createToolOrchestrator,
   type ToolOrchestrator,
@@ -86,6 +87,9 @@ export const tools = {
   ls: LsTool,
   output: OutputTool,
   memory: MemoryTool,
+  // Unattended runs only. Deliberately absent from the provider-facing tool
+  // list unless the loop has an unattended context — see defs-cache.ts.
+  finish_iteration: FinishIterationTool,
 } as const;
 
 export type ToolId = keyof typeof tools;

@@ -19,6 +19,12 @@ export interface ToolContext {
   /** The spawning run's provider and model — what a subagent inherits. */
   provider?: string;
   model?: string;
+  /**
+   * Present only inside an unattended run (`freecode night`): `question`
+   * answers itself through it and `finish_iteration` reports through it.
+   * Absent in every attended session.
+   */
+  unattended?: import("../autonomous/types.js").UnattendedContext;
   fileCache?: FileCache;
   permissionProfile?: PermissionProfile;
   hooks?: unknown;

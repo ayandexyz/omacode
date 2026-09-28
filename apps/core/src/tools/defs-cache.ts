@@ -31,8 +31,16 @@ function ensureSubscribed(): void {
   bus.subscribe("mcp.tools.changed", invalidateToolDefs);
 }
 
+/**
+ * Offered only inside an unattended run (`freecode night`), so it is filtered
+ * out of the shared list and added back by `unattendedToolDefs`. An attended
+ * session must never see a tool whose whole job is to end an iteration.
+ */
+export const UNATTENDED_ONLY_TOOLS = new Set(["finish_iteration"]);
+
 function buildAll(): ProviderToolDef[] {
   return listTools()
+    .filter((t) => !UNATTENDED_ONLY_TOOLS.has(t.id))
     .map((t) => {
       const toolDef = getTool(t.id);
       return {
@@ -69,6 +77,26 @@ export function getToolDefs(mode?: AgentMode): ProviderToolDef[] {
     cachedReadOnly.set(mode, filtered);
   }
   return filtered;
+}
+
+/**
+ * The unattended tool list: everything the mode allows, plus the tools only an
+ * unattended run may call. Not cached — one build per iteration, not per turn,
+ * and an iteration is minutes long.
+ */
+export function unattendedToolDefs(mode?: AgentMode): ProviderToolDef[] {
+  const extra = [...UNATTENDED_ONLY_TOOLS].flatMap((id) => {
+    const tool = getTool(id);
+    if (!tool) return [];
+    return [
+      {
+        name: id,
+        description: tool.description,
+        parameters: tool.schemas.parameters as unknown as Record<string, unknown>,
+      },
+    ];
+  });
+  return [...getToolDefs(mode), ...extra];
 }
 
 export function invalidateToolDefs(): void {

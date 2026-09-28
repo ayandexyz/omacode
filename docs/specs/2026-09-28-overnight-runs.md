@@ -708,15 +708,36 @@ Each phase is shippable and revertible on `autonomous`.
   purchase Credits" classifies **`credits`**, not `window` — waiting cannot
   fix it.
 
-**Phase 1 — Foreground iteration loop with the leash.** The core.
+**Phase 1 — Foreground iteration loop with the leash.** The core. **Built
+2026-09-28**, minus `--verify` / `--stop-when` (Phase 2) and the paid eval below.
 - `orchestrator`, `iteration`, `prompt`, `git`, `notes`, `finish_iteration`,
   envelope, unattended `question`, decisions log, `--max-iterations`,
   `--max-usd`, `--until`, consecutive-failure abort, graceful/hard interrupt,
   exit summary (report v0 = terminal only).
 - Safety ships with the first runnable version — no phase runs unattended
   without the envelope.
-- *Verify:* unit + integration suites; `evals/night.jsonl` finish-compliance ≥
-  90% on the default provider before Phase 2.
+- *Verify:* unit + integration suites — `orchestrator.test.ts` (15 cases over
+  fake git/clock/iterations), `envelope.test.ts`, `finish-iteration.test.ts`,
+  `night-store.test.ts`, `git.test.ts` (a real repo in a tmpdir: commit lands,
+  failure leaves no trace, pre-commit failure keeps the work, `main` untouched).
+  **Still open:** `evals/night.jsonl` finish-compliance ≥ 90% on the default
+  provider before Phase 2 — real paid turns, so it is a deliberate spend, and
+  §6 failure mode 1 stays unmeasured until it runs.
+
+  As built: `autonomous/{orchestrator,iteration,prompt,envelope,git,night-store}.ts`,
+  `tools/finish-iteration.ts`, `cli/commands/night{,-run}.ts`. The loop learned
+  one seam — `AgentLoopConfig.unattended` (spec §4.4–§4.6) — which decides an
+  `ask` without a human, reaches tools through `ToolContext.unattended`, puts
+  the unattended-only tools on the provider's list (`unattendedToolDefs`), and
+  ends the run once `finish` is set. `PermissionSettingsManager.addSessionDeny`
+  is new: the envelope's rules must land in the DENY tier, or a user's own
+  `Bash(git:*)` allow would widen them.
+
+  Deviations worth knowing: **Phase 1 aborts on a spent quota** rather than
+  waiting (`permanent_error`) — waiting is Phase 2, and pretending to wait would
+  hang. `--until` is checked BETWEEN iterations, not predicted: an iteration
+  that starts inside the window may finish outside it, and killing it mid-step
+  would discard real work.
 
 **Phase 2 — Surviving the night.**
 - Quota waits (§4.7) + `--max-wait` + `--fallback-model`; sleep inhibition;
