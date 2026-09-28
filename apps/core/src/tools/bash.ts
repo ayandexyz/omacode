@@ -17,6 +17,7 @@ import { buildTool } from "./factory.js";
 import { BASH_DESCRIPTION } from "./bash-prompt.js";
 import { classifyCommand } from "./output-compress.js";
 import { spawnShell } from "./shells/spawn.js";
+import type { SpawnedShell } from "./shells/spawn.js";
 import { getShellRegistry, shellSessionOf } from "./shells/index.js";
 import type { ShellRegistry, ShellStartOptions } from "./shells/registry.js";
 import type { ShellSummary } from "./shells/types.js";
@@ -201,6 +202,7 @@ export function trackShell(
     command: params.command,
     cwd,
     owner: sessionId,
+    sandbox: ctx.unattended?.sandbox,
     onData: (id, chunk) => {
       BusEvents.stream(rootId, {
         type: "shell_output",
@@ -336,7 +338,16 @@ function runForeground(
       Number.isFinite(asked) && asked > 0 ? asked : defaultTimeout,
       MAX_TIMEOUT,
     );
-    const spawned = spawnShell(params.command, cwd);
+    let spawned: SpawnedShell;
+    try {
+      spawned = spawnShell(params.command, cwd, ctx.unattended?.sandbox);
+    } catch (error) {
+      resolve({
+        success: false,
+        error: `Error preparing command sandbox: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      return;
+    }
     const { child, killTree } = spawned;
     // At the timeout a command is moved to the background instead of killed —
     // unless the model bounded it on purpose with a short explicit `timeout`.

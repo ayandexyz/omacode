@@ -6,6 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  commitMessage,
   DEFAULT_MAX_CONSECUTIVE_FAILURES,
   DEFAULT_MAX_WAIT_MS,
   runNight,
@@ -17,6 +18,14 @@ import type {
   IterationFailureReason,
   IterationRecord,
 } from "./types.js";
+
+test("conventional commit preset stays machine-parseable", () => {
+  assert.equal(commitMessage(4, "speed up rendering"), "night 4: speed up rendering");
+  assert.equal(
+    commitMessage(4, "speed up rendering", "conventional"),
+    "chore(night): speed up rendering",
+  );
+});
 
 function finish(
   over: Partial<FinishIterationResult> = {},

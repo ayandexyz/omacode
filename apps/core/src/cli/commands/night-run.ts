@@ -8,7 +8,7 @@
 // =============================================================================
 
 import * as path from "path";
-import { parseDuration, parseUntil } from "./night.js";
+import { parseDuration, parseStartAt, parseUntil } from "./night.js";
 
 interface NightCliArgs {
   objective: string[];
@@ -25,6 +25,10 @@ interface NightCliArgs {
   push: boolean;
   allow: string[];
   deny: string[];
+  detach: boolean;
+  at?: string;
+  sandbox: boolean;
+  commitStyle: "night" | "conventional";
 }
 
 /**
@@ -55,6 +59,105 @@ function sleepUntil(
 export async function runNightCli(argv: NightCliArgs): Promise<void> {
   const typed = argv.objective.join(" ").trim();
 
+  // Phase 5: the parent does no backend bootstrapping. It records a pending
+  // manifest, launches this exact CLI as a detached worker, and can exit.
+  const isWorker = process.env.FREECODE_NIGHT_WORKER === "1";
+  if (!isWorker && (argv.detach || argv.at !== undefined)) {
+    if (!typed) fail("Error: detached and scheduled runs need an explicit objective.");
+    const scheduledFor = argv.at ? parseStartAt(argv.at) : undefined;
+    if (argv.at && scheduledFor === undefined) {
+      fail(
+        `Error: --at "${argv.at}" is not a future time (23:30), duration (90m), or ISO timestamp.`,
+      );
+    }
+    if (
+      argv.maxIterations === undefined &&
+      argv.maxUsd === undefined &&
+      argv.until === undefined
+    ) {
+      fail(
+        "Error: a night run needs a limit. Pass at least one of --until, --max-iterations, --max-usd.",
+      );
+    }
+    if (argv.until && parseUntil(argv.until) === undefined) {
+      fail(`Error: --until "${argv.until}" is not a time (07:00) or duration (8h).`);
+    }
+    if (argv.maxWait && parseDuration(argv.maxWait) === undefined) {
+      fail(`Error: --max-wait "${argv.maxWait}" is not a duration (8h, 90m).`);
+    }
+    if (argv.fallbackModel && !argv.fallbackModel.includes("/")) {
+      fail(`Error: --fallback-model "${argv.fallbackModel}" must be provider/model.`);
+    }
+    if (argv.sandbox && process.platform === "linux") {
+      const { bubblewrapAvailable } = await import("../../autonomous/sandbox.js");
+      if (!bubblewrapAvailable()) {
+        fail(
+          "Error: --sandbox requires bubblewrap (`bwrap`) on Linux. Install it, or explicitly pass --no-sandbox.",
+        );
+      }
+    }
+    const { launchDetachedNight } = await import(
+      "../../autonomous/supervisor.js"
+    );
+    const selected: { provider?: string; model?: string } = argv.model
+      ? splitModel(argv.model)
+      : {};
+    const launched = launchDetachedNight({
+      objective: typed,
+      projectPath: process.cwd(),
+      scheduledFor,
+      provider: selected.provider,
+      model: selected.model,
+      maxIterations: argv.maxIterations,
+      maxUsd: argv.maxUsd,
+      verify: argv.verify,
+      stopWhen: argv.stopWhen,
+      sandbox: argv.sandbox,
+      commitStyle: argv.commitStyle,
+    });
+    console.log(
+      [
+        `${scheduledFor ? "scheduled" : "detached"} night run ${launched.runId} (pid ${launched.pid})`,
+        scheduledFor ? `  starts: ${new Date(scheduledFor).toLocaleString()}` : "",
+        `  status: freecode night status ${launched.runId}`,
+        `  log:    ${launched.logPath}`,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    );
+    return;
+  }
+
+  // A scheduled worker owns its wait and sleep inhibitor. Cancellation is a
+  // manifest bit, just like cancellation between live iterations.
+  if (isWorker) {
+    const scheduledFor = Number(process.env.FREECODE_NIGHT_SCHEDULED_FOR);
+    const workerRunId = process.env.FREECODE_NIGHT_RUN_ID;
+    if (workerRunId && Number.isFinite(scheduledFor) && scheduledFor > Date.now()) {
+      const { inhibitSleep } = await import("../../autonomous/inhibit.js");
+      const { readManifest, updateManifest } = await import(
+        "../../autonomous/run-store.js"
+      );
+      const scheduledInhibitor = inhibitSleep(argv.inhibit);
+      while (Date.now() < scheduledFor) {
+        const manifest = readManifest(workerRunId);
+        if (manifest?.cancelRequested) {
+          updateManifest(workerRunId, (m) => ({
+            ...m,
+            status: "cancelled",
+            endedAt: Date.now(),
+          }));
+          scheduledInhibitor.release();
+          return;
+        }
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(1_000, scheduledFor - Date.now())),
+        );
+      }
+      scheduledInhibitor.release();
+    }
+  }
+
   const { runNight, DEFAULT_MAX_CONSECUTIVE_FAILURES, DEFAULT_MAX_WAIT_MS } =
     await import("../../autonomous/orchestrator.js");
   const { inhibitSleep } = await import("../../autonomous/inhibit.js");
@@ -65,7 +168,7 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
   const { createGitOps, branchSlug } = await import("../../autonomous/git.js");
   const { ENVELOPE_DENY_RULES } = await import("../../autonomous/envelope.js");
   const store = await import("../../autonomous/night-store.js");
-  const { writeManifest, updateManifest, readManifest } = await import(
+  const { writeManifest, updateManifest, readManifest, runDir } = await import(
     "../../autonomous/run-store.js"
   );
   const { DEFAULT_RUN_LIMITS, EMPTY_USAGE } = await import(
@@ -81,6 +184,9 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
   );
   const { initHooks } = await import("../../hooks/bootstrap.js");
   const { randomUUID } = await import("crypto");
+  const { bubblewrapAvailable, sandboxEnvironment, sandboxPlan } = await import(
+    "../../autonomous/sandbox.js"
+  );
 
   let projectPath = process.cwd();
   let git = createGitOps(projectPath);
@@ -101,6 +207,10 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
     );
   }
   const objective = resuming?.night?.objective ?? typed;
+  // Detached workers always isolate themselves; knowing that at preflight is
+  // important for scheduled starts, because the user may have edited their
+  // checkout by the time the worker wakes and those edits are not in its tree.
+  const useWorktree = argv.worktree || isWorker;
 
   // ---- Preflight (§4.2). Refuse rather than start something we cannot protect.
   if (!(await git.isRepo())) {
@@ -111,7 +221,7 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
   if ((await git.currentBranch()) === undefined) {
     fail("Error: detached HEAD. Check out a branch before starting a night run.");
   }
-  const dirty = await git.dirtyPaths();
+  const dirty = useWorktree ? [] : await git.dirtyPaths();
   if (dirty.length > 0) {
     fail(
       `Error: the working tree is dirty. A night run resets the tree on a failed step, which would discard this work:\n${dirty
@@ -144,6 +254,19 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
       fail(err instanceof Error ? err.message : String(err));
     }
   }
+
+  let sandbox = resuming?.night?.sandbox ?? argv.sandbox;
+  if (sandbox && process.platform === "linux" && !bubblewrapAvailable()) {
+    fail(
+      "Error: --sandbox requires bubblewrap (`bwrap`) on Linux. Install it, or explicitly pass --no-sandbox to use only the permission envelope.",
+    );
+  }
+  if (sandbox && process.platform !== "linux") {
+    console.warn(
+      `Warning: the Phase 5 OS sandbox is unavailable on ${process.platform}; continuing with the permission envelope.`,
+    );
+    sandbox = false;
+  }
   if (!provider) {
     fail(
       "No provider configured. Set current.provider in ~/.freecode/config.json, export a provider API key, or pass --model <provider>/<model>.",
@@ -165,6 +288,7 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
   }
   // An unbounded night has to be a choice, not a default (§4.12).
   if (
+    !resuming &&
     argv.maxIterations === undefined &&
     argv.maxUsd === undefined &&
     until === undefined
@@ -184,14 +308,17 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
     }
   }
 
-  if (argv.worktree && !resuming) {
+  // A detached worker must never switch the branch in the checkout the user
+  // is still using. It always gets a dedicated worktree, even if the caller
+  // omitted --worktree (foreground runs preserve the explicit flag behavior).
+  if (useWorktree && !resuming) {
     // A worktree means the user keeps their checkout while the night runs.
     // The run's project path becomes the worktree, which is also what the
     // envelope bounds writes to.
     const worktreeDir = path.join(
       path.dirname(projectPath),
       `${path.basename(projectPath)}-night-worktrees`,
-      branchSlug(objective),
+      branchSlug(branch.replace(/^night\//, "")),
     );
     try {
       await git.addWorktree(worktreeDir, branch);
@@ -213,19 +340,36 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
   // run adds to it.
   const baseCommit = (await git.headHash()) ?? "HEAD";
 
-  const runId = resuming?.runId ?? randomUUID().slice(0, 8);
+  const runId =
+    resuming?.runId ??
+    process.env.FREECODE_NIGHT_RUN_ID ??
+    randomUUID().slice(0, 8);
+  const stopWhen = resuming?.night?.stopWhen ?? argv.stopWhen;
+  const commitStyle = resuming?.night?.commitStyle ?? argv.commitStyle;
+  const verifyCommand = resuming?.night?.verifyCommand ?? argv.verify;
+  const fallbackModel = resuming?.night?.fallbackModel ?? argv.fallbackModel;
   const night = {
     objective,
     branch,
-    stopWhen: argv.stopWhen,
-    verifyCommand: argv.verify,
-    fallbackModel: argv.fallbackModel,
+    stopWhen,
+    verifyCommand,
+    fallbackModel,
     // A resumed run continues the first one's numbering and commit list, so
     // the report covers the whole night rather than the last leg of it.
     iterations: resuming?.night?.iterations ?? 0,
     commits: resuming?.night?.commits ?? [],
     waitedMs: resuming?.night?.waitedMs ?? 0,
     fallbackIterations: resuming?.night?.fallbackIterations ?? [],
+    detached: isWorker || resuming?.night?.detached,
+    scheduledFor:
+      (Number.isFinite(Number(process.env.FREECODE_NIGHT_SCHEDULED_FOR))
+        ? Number(process.env.FREECODE_NIGHT_SCHEDULED_FOR)
+        : undefined) ?? resuming?.night?.scheduledFor,
+    logPath:
+      resuming?.night?.logPath ??
+      (isWorker ? path.join(runDir(runId), "worker.log") : undefined),
+    sandbox,
+    commitStyle,
   };
   writeManifest({
     runId,
@@ -242,7 +386,7 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
     },
     usage: resuming?.usage ?? EMPTY_USAGE,
     turns: 0,
-    verifyCommand: argv.verify ?? "",
+    verifyCommand: verifyCommand ?? "",
     pid: process.pid,
     taskCardCount: 0,
     night,
@@ -286,8 +430,8 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
       `  objective: ${objective}`,
       `  model:     ${provider}${model ? `/${model}` : ""}`,
       `  limits:    ${describeLimits(argv, until)}`,
-      argv.verify ? `  verify:    ${argv.verify}` : "",
-      argv.stopWhen ? `  stop when: ${argv.stopWhen}` : "",
+      verifyCommand ? `  verify:    ${verifyCommand}` : "",
+      stopWhen ? `  stop when: ${stopWhen}` : "",
       `  notes:     ${path.dirname(store.notesPath(runId))}`,
       "",
       inhibitor.kind === "none"
@@ -315,32 +459,42 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
         runIteration({
           ...input,
           objective,
-          stopWhen: argv.stopWhen,
+          stopWhen,
           projectPath,
           // `--fallback-model` is spent on the first quota window, and only
           // then: the orchestrator decides, this just resolves the string.
-          ...(input.useFallback && argv.fallbackModel
-            ? splitModel(argv.fallbackModel)
+          ...(input.useFallback && fallbackModel
+            ? splitModel(fallbackModel)
             : { provider: provider!, model }),
           denyRules: [...ENVELOPE_DENY_RULES, ...argv.deny],
           allowRules: argv.allow,
           onDecision: (d) => store.appendDecision(runId, d),
           signal: hardAbort.signal,
+          sandbox,
         }),
       git,
       notes: {
         read: () => store.readNotes(runId),
         append: (section) => store.appendNotes(runId, section),
       },
-      ...(argv.verify
+      ...(verifyCommand
         ? {
             verify: async () => {
               try {
-                const { stdout, stderr } = await exec(argv.verify!, {
-                  cwd: projectPath,
-                  shell: true,
-                  maxBuffer: 8 * 1024 * 1024,
-                } as never);
+                const plan = sandbox
+                  ? sandboxPlan(verifyCommand, projectPath, projectPath)
+                  : undefined;
+                const { stdout, stderr } = plan
+                  ? await exec(plan.command, plan.args, {
+                    cwd: projectPath,
+                    maxBuffer: 8 * 1024 * 1024,
+                    env: sandboxEnvironment(),
+                    })
+                  : await exec(verifyCommand, {
+                      cwd: projectPath,
+                      shell: true,
+                      maxBuffer: 8 * 1024 * 1024,
+                    } as never);
                 return { ok: true, output: `${stdout}${stderr}` };
               } catch (error) {
                 const e = error as { stdout?: string; stderr?: string; message?: string };
@@ -396,8 +550,9 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
       until,
       maxWaitMs: maxWaitMs ?? DEFAULT_MAX_WAIT_MS,
       startIteration: resuming?.night?.iterations ?? 0,
-      fallbackModel: argv.fallbackModel,
-      stopWhen: argv.stopWhen,
+      fallbackModel,
+      stopWhen,
+      commitStyle,
       maxConsecutiveFailures: DEFAULT_MAX_CONSECUTIVE_FAILURES,
     },
   );

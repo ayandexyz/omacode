@@ -1,7 +1,7 @@
 # Overnight Runs — `freecode night`
 
-> **Status:** Design (2026-09-28). Nothing below is built except what §2.3 lists as
-> already existing.
+> **Status:** Built through Phase 5 (2026-09-28). The phase notes in §8 are the
+> implementation record; remaining measurements and open questions are called out there.
 > **Branch:** `autonomous`.
 > **Supersedes:** Phases 1–5 of `2026-08-10-autonomous-runs-design.md`. Its Phase 0
 > (`autonomous/types.ts`, `budget.ts`, `run-store.ts`) is kept and extended; its
@@ -511,6 +511,10 @@ freecode night "<objective>"            start (objective also from stdin / --fil
   --fallback-model <provider/model>
   --worktree                              run in <repo>-night-worktrees/<slug>
   --push                                  push the run branch after each commit (never force)
+  --detach                                detached worker; always uses a dedicated worktree
+  --at <HH:MM|duration|ISO>               scheduled detached start
+  --[no-]sandbox                          bubblewrap filesystem sandbox (on by default on Linux)
+  --commit-style night|conventional       commit-subject preset
   --model / --effort / --allow / --deny   as in `freecode run`
   --no-inhibit
 freecode night                           on a night/* branch: resume that run
@@ -599,7 +603,7 @@ leak-free, like every other rollout event).
 
 | Case | Handling |
 | --- | --- |
-| Terminal closed | Run dies (foreground by design). Manifest still `running` with a dead pid ⇒ `status`/next start marks it `crashed`; `freecode night` on the branch resumes. Recommend `tmux`/`nohup` in the docs until Phase 5. |
+| Terminal closed | A foreground run dies and is marked `crashed`; `--detach` survives because its worker owns the manifest and log. |
 | Two runs on the same repo | Allowed only with `--worktree`; otherwise refused (they'd share a checkout). |
 | Core crash mid-iteration | Same as terminal closed; uncommitted changes remain and the report (regenerated) says so. |
 
@@ -849,8 +853,26 @@ stays in the transcript to refer back to.
 - *Verify:* `night-panel.test.ts` (11) + the three IPC methods exercised against
   a real `handleRequest`. Core 1815, TUI 329, both green.
 
-**Phase 5 — Only if asked.** Detached execution (old spec §4.4a), OS sandbox for
-bash, conventional-commit preset, scheduled starts.
+**Phase 5 — Only if asked. Built 2026-09-28.** Detached execution (old spec
+§4.4a), OS sandbox for bash, conventional-commit preset, scheduled starts.
+
+Detached runs re-exec the same CLI with a small environment handoff (run id and
+scheduled time), redirect output to `<run>/worker.log`, and always create a dedicated
+worktree so the worker never changes the user's active checkout. A provisional
+`pending` manifest exists before spawn; its PID is reconciled with the same dead-process
+logic as a running night. `night stop` also cancels a pending scheduled run.
+
+The bash sandbox is Linux bubblewrap: host `/` is read-only, the user's home is hidden,
+credential-shaped environment variables are stripped, the run worktree is the only
+read-write bind, `/tmp` is private, and process/IPC/UTS namespaces are isolated.
+Network remains shared so package installation and user-approved web work keep their
+existing semantics; the permission envelope still refuses publishing/pushing. The same
+sandbox wraps `--verify` and background shells. Linux fails closed when `bwrap` is
+missing unless the user explicitly passes `--no-sandbox`; unsupported OSes warn and
+retain the envelope. `--commit-style conventional` emits
+`chore(night): <iteration summary>`. Scheduling accepts local `HH:MM`, a duration, or
+a future ISO timestamp and uses the detached worker plus sleep inhibition while it
+waits.
 
 ---
 

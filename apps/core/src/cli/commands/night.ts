@@ -20,6 +20,10 @@ interface NightArgs {
   push: boolean;
   allow: string[];
   deny: string[];
+  detach: boolean;
+  at?: string;
+  sandbox: boolean;
+  commitStyle: "night" | "conventional";
 }
 
 /** `--max-wait 8h` / `90m` → ms. Returns undefined if unparseable. */
@@ -47,6 +51,14 @@ export function parseUntil(value: string, now = Date.now()): number | undefined 
     return at.getTime();
   }
   return undefined;
+}
+
+/** Scheduled start: local HH:MM, duration, or an ISO timestamp in the future. */
+export function parseStartAt(value: string, now = Date.now()): number | undefined {
+  const relative = parseUntil(value, now);
+  if (relative !== undefined) return relative;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && parsed > now ? parsed : undefined;
 }
 
 /** `night status|report|list|stop` — reading a night, during or after it. */
@@ -162,6 +174,29 @@ export const nightCommand: CommandModule<object, NightArgs> = {
         type: "boolean",
         default: false,
         describe: "push the run's branch after each commit (never forced)",
+      })
+      .option("detach", {
+        type: "boolean",
+        default: false,
+        describe: "run in a detached worker; the terminal may close",
+      })
+      .option("at", {
+        type: "string",
+        describe:
+          "start later in a detached worker: HH:MM, duration (90m), or ISO timestamp",
+      })
+      .option("sandbox", {
+        type: "boolean",
+        default: true,
+        describe:
+          "confine unattended bash writes to the run tree with bubblewrap (--no-sandbox to opt out)",
+      })
+      .option("commitStyle", {
+        alias: "commit-style",
+        choices: ["night", "conventional"] as const,
+        default: "night" as const,
+        describe:
+          "commit subject preset: 'night N: …' or Conventional Commits 'chore(night): …'",
       })
       .option("inhibit", {
         type: "boolean",

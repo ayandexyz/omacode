@@ -87,6 +87,15 @@ test("a run whose process is alive is left alone", () => {
   });
 });
 
+test("a scheduled pending run is live while its worker is alive and crashes if it dies", () => {
+  withRunsHome(() => {
+    writeManifest(manifest({ status: "pending", pid: process.pid, startedAt: undefined }));
+    assert.equal(reconcileCrashed(readManifest("run-1")!).status, "pending");
+    writeManifest(manifest({ status: "pending", pid: 4_194_304, startedAt: undefined }));
+    assert.equal(reconcileCrashed(readManifest("run-1")!).status, "crashed");
+  });
+});
+
 test("a finished run is never re-judged by its pid", () => {
   withRunsHome(() => {
     // Its pid is long gone by definition; that is not a crash.
@@ -131,6 +140,10 @@ test("stop is only for a running run, and is recorded rather than signalled", ()
     writeManifest(manifest({ pid: process.pid }));
     assert.equal(requestStop(readManifest("run-1")!), true);
     assert.equal(readManifest("run-1")!.cancelRequested, true);
+
+    writeManifest(manifest({ runId: "scheduled", status: "pending", pid: process.pid }));
+    assert.equal(requestStop(readManifest("scheduled")!), true);
+    assert.equal(readManifest("scheduled")!.cancelRequested, true);
 
     writeManifest(manifest({ runId: "done", status: "completed" }));
     assert.equal(requestStop(readManifest("done")!), false);

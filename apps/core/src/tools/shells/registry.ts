@@ -13,7 +13,7 @@
 // =============================================================================
 
 import type { ShellReadResult, ShellStatus, ShellSummary } from "./types.js";
-import { spawnShell, type SpawnedShell } from "./spawn.js";
+import { spawnShell, type ShellSandbox, type SpawnedShell } from "./spawn.js";
 
 /** Per-shell ring-buffer cap. A dev server can log for hours; keep the tail. */
 export const SHELL_BUFFER_CHARS = 256_000;
@@ -43,6 +43,7 @@ export interface ShellStartOptions {
   onData?: (id: string, chunk: string) => void;
   /** Notified once the process settles, for the same reason. */
   onExit?: (id: string, status: ShellStatus, exitCode: number | null) => void;
+  sandbox?: ShellSandbox;
 }
 
 /** A later subscriber to a running shell — `monitor({ bash_id })`. */
@@ -91,7 +92,11 @@ export class ShellRegistry {
    */
   start(options: ShellStartOptions): ShellSummary {
     this.assertRoom();
-    return this.attach(options, spawnShell(options.command, options.cwd), "");
+    return this.attach(
+      options,
+      spawnShell(options.command, options.cwd, options.sandbox),
+      "",
+    );
   }
 
   /**

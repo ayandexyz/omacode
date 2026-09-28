@@ -181,6 +181,13 @@ export interface NightManifestFields {
   stopReason?: string;
   /** Left in the tree when the run ended. Absent means nothing was. */
   uncommitted?: string[];
+  /** Phase 5 lifecycle metadata. A pending scheduled run has not started yet. */
+  detached?: boolean;
+  scheduledFor?: number;
+  logPath?: string;
+  /** Whether unattended shell commands are confined to the run tree. */
+  sandbox?: boolean;
+  commitStyle?: "night" | "conventional";
 }
 
 /** What the model reports through `finish_iteration` (§4.4). */
@@ -292,4 +299,6 @@ export interface UnattendedContext {
   ): { allowed: boolean; reason?: string };
   /** Record a self-answered question or a refusal for the report. */
   record(decision: Decision): void;
+  /** Passed to the bash tool; absent keeps attended shells unchanged. */
+  sandbox?: { projectPath: string };
 }

@@ -58,6 +58,7 @@ export interface NightLimits {
    * describe two different steps by the same number.
    */
   startIteration?: number;
+  commitStyle?: "night" | "conventional";
 }
 
 export const DEFAULT_MAX_CONSECUTIVE_FAILURES = 3;
@@ -344,7 +345,9 @@ export async function runNight(
       }
     }
 
-    const commit = await deps.git.commitAll(`night ${iteration}: ${finish.summary}`);
+    const commit = await deps.git.commitAll(
+      commitMessage(iteration, finish.summary, limits.commitStyle),
+    );
     if (!commit.ok) {
       // The work stays in the tree and the next iteration is told to repair it.
       // Two failed repairs in a row means the blocker is not something the
@@ -435,6 +438,16 @@ export async function runNight(
       `iteration ${iteration}: failed (${reason}) — reset, ${consecutiveFailures} in a row`,
     );
   }
+}
+
+export function commitMessage(
+  iteration: number,
+  summary: string,
+  style: "night" | "conventional" = "night",
+): string {
+  return style === "conventional"
+    ? `chore(night): ${summary}`
+    : `night ${iteration}: ${summary}`;
 }
 
 /** The end of a verify failure, where the reason lives. */

@@ -37,7 +37,11 @@ export function pidAlive(pid: number | undefined): boolean {
  * agree, and so a later resume knows what it is resuming.
  */
 export function reconcileCrashed(manifest: RunManifest): RunManifest {
-  if (manifest.status !== "running" || pidAlive(manifest.pid)) return manifest;
+  if (
+    (manifest.status !== "running" && manifest.status !== "pending") ||
+    pidAlive(manifest.pid)
+  )
+    return manifest;
   const crashed: RunManifest = {
     ...manifest,
     status: "crashed",
@@ -113,7 +117,7 @@ export function buildReport(
 
 /** Ask a running night to stop at the next iteration boundary. */
 export function requestStop(manifest: RunManifest): boolean {
-  if (manifest.status !== "running") return false;
+  if (manifest.status !== "running" && manifest.status !== "pending") return false;
   return (
     updateManifest(manifest.runId, (m) => ({ ...m, cancelRequested: true })) !==
     null

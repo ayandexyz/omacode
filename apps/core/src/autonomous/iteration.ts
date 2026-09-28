@@ -46,6 +46,7 @@ export interface IterationInput {
   onDecision(decision: Decision): void;
   /** Stops the iteration early: a hard interrupt, or the run's deadline. */
   signal?: AbortSignal;
+  sandbox?: boolean;
 }
 
 export interface IterationOutcome {
@@ -95,6 +96,7 @@ export async function runIteration(
       return { allowed: true };
     },
     record: input.onDecision,
+    ...(input.sandbox ? { sandbox: { projectPath: input.projectPath } } : {}),
   };
 
   // Belt and braces with the run's own deadline: a single iteration that hangs

@@ -20,6 +20,10 @@ export const nightOps = {
 
     console.log(statusLine(run));
     console.log(`  objective: ${run.night.objective}`);
+    if (run.status === "pending" && run.night.scheduledFor) {
+      console.log(`  starts:    ${new Date(run.night.scheduledFor).toLocaleString()}`);
+    }
+    if (run.night.logPath) console.log(`  log:       ${run.night.logPath}`);
     if (run.night.stopReason) console.log(`  stopped:   ${run.night.stopReason}`);
     if (run.status === "crashed") {
       // The one status nobody chose: its process is gone and it never wrote an
@@ -70,8 +74,10 @@ export const nightOps = {
     // Checked at the next iteration boundary, never signalled: a process killed
     // mid-write is how manifests corrupt.
     console.log(
-      `Asked ${run.runId} to stop. It finishes the current iteration first, ` +
-        `so its work is committed rather than discarded.`,
+      run.status === "pending"
+        ? `Asked ${run.runId} not to start. Its scheduled worker will exit.`
+        : `Asked ${run.runId} to stop. It finishes the current iteration first, ` +
+            `so its work is committed rather than discarded.`,
     );
   },
 };
