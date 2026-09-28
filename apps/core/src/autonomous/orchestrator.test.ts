@@ -532,3 +532,26 @@ test("verify does not run for a learnings-only iteration — there is nothing to
   assert.equal(result.stopReason, "objective_met");
   assert.equal(h.resets, 0);
 });
+
+test("a resumed run continues the numbering instead of restarting at 1", async () => {
+  // Restarting at 1 would put a second `night 1:` commit on a branch that
+  // already has one, and the report would describe two steps by one number.
+  const h = harness({ outcomes: [{ finish: finish({ shouldStop: true }) }] });
+  const result = await runNight(h.deps, limits({ startIteration: 4 }));
+
+  assert.deepEqual(h.commitCalls, ["night 5: did a thing"]);
+  assert.equal(result.iterations, 5, "absolute, not this leg's count");
+});
+
+test("--max-iterations counts this leg's work, not the whole run's history", async () => {
+  // Otherwise a resume of a 10-iteration night with --max-iterations 3 would
+  // stop before doing anything at all.
+  const h = harness({ outcomes: [{ finish: finish() }] });
+  const result = await runNight(
+    h.deps,
+    limits({ startIteration: 10, maxIterations: 2 }),
+  );
+  assert.equal(result.iterations, 12);
+  assert.equal(result.commits.length, 2);
+  assert.equal(result.stopReason, "max_iterations");
+});

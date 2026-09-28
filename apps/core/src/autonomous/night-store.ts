@@ -24,6 +24,8 @@ export const decisionsPath = (runId: string): string =>
   path.join(runDir(runId), "decisions.jsonl");
 export const iterationsPath = (runId: string): string =>
   path.join(runDir(runId), "iterations.jsonl");
+export const reportPathFor = (runId: string): string =>
+  path.join(runDir(runId), "report.md");
 
 /** What replaces a line that carries a credential. Kept visible, not dropped. */
 export const REDACTED = "[redacted: looked like a credential]";
@@ -34,6 +36,31 @@ export function scrub(text: string): string {
     .split("\n")
     .map((line) => (containsSecret(line) ? REDACTED : line))
     .join("\n");
+}
+
+/**
+ * Scrub the STRING FIELDS of a record, not its serialized form.
+ *
+ * Scrubbing the finished JSON line replaced the whole line with the redaction
+ * marker, which is not JSON — so the reader skipped it and the record vanished
+ * instead of appearing redacted. A `needs_human` item that happens to quote a
+ * credential is exactly the case where the user must still be told something
+ * needs them.
+ */
+export function scrubFields<T>(value: T): T {
+  if (typeof value === "string") {
+    return (containsSecret(value) ? REDACTED : value) as T;
+  }
+  if (Array.isArray(value)) return value.map(scrubFields) as T;
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([k, v]) => [
+        k,
+        scrubFields(v),
+      ]),
+    ) as T;
+  }
+  return value;
 }
 
 function append(filePath: string, text: string): void {
@@ -54,7 +81,7 @@ export function readNotes(runId: string): string {
 }
 
 export function appendDecision(runId: string, decision: Decision): void {
-  append(decisionsPath(runId), `${scrub(JSON.stringify(decision))}\n`);
+  append(decisionsPath(runId), `${JSON.stringify(scrubFields(decision))}\n`);
 }
 
 /** Iterations and waits share one log: the night is both, in order. */
@@ -62,7 +89,7 @@ export function appendIteration(
   runId: string,
   record: IterationRecord | WaitRecord,
 ): void {
-  append(iterationsPath(runId), `${scrub(JSON.stringify(record))}\n`);
+  append(iterationsPath(runId), `${JSON.stringify(scrubFields(record))}\n`);
 }
 
 /** Unparseable lines are skipped: a truncated last line must not lose the rest. */

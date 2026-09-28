@@ -21,6 +21,8 @@ interface NightCliArgs {
   verify?: string;
   stopWhen?: string;
   inhibit: boolean;
+  worktree: boolean;
+  push: boolean;
   allow: string[];
   deny: string[];
 }
@@ -51,10 +53,7 @@ function sleepUntil(
 }
 
 export async function runNightCli(argv: NightCliArgs): Promise<void> {
-  const objective = argv.objective.join(" ").trim();
-  if (!objective) {
-    fail("Error: no objective given. `freecode night \"<what to work on>\"`");
-  }
+  const typed = argv.objective.join(" ").trim();
 
   const { runNight, DEFAULT_MAX_CONSECUTIVE_FAILURES, DEFAULT_MAX_WAIT_MS } =
     await import("../../autonomous/orchestrator.js");
@@ -72,6 +71,9 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
   const { DEFAULT_RUN_LIMITS, EMPTY_USAGE } = await import(
     "../../autonomous/types.js"
   );
+  const { findNightRun, buildReport } = await import(
+    "../../autonomous/night-ops.js"
+  );
   const { initProviders } = await import("../../providers/index.js");
   const { initMcpServers } = await import("../../mcp/index.js");
   const { readConfig, fallbackProviderFromCredentials } = await import(
@@ -80,8 +82,25 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
   const { initHooks } = await import("../../hooks/bootstrap.js");
   const { randomUUID } = await import("crypto");
 
-  const projectPath = process.cwd();
-  const git = createGitOps(projectPath);
+  let projectPath = process.cwd();
+  let git = createGitOps(projectPath);
+
+  // ---- Resume: `freecode night` on a night/* branch continues that run
+  // rather than refusing for want of an objective. The branch is the handle —
+  // it is what the user still has in the morning after the terminal is gone.
+  const branchNow = await git.currentBranch();
+  const resuming =
+    typed === "" && branchNow?.startsWith("night/")
+      ? findNightRun(branchNow)
+      : undefined;
+  if (typed === "" && !resuming) {
+    fail(
+      branchNow?.startsWith("night/")
+        ? `Error: no recorded run for branch ${branchNow}. Start a new one with an objective.`
+        : 'Error: no objective given. `freecode night "<what to work on>"`, or run it on a night/* branch to resume.',
+    );
+  }
+  const objective = resuming?.night?.objective ?? typed;
 
   // ---- Preflight (§4.2). Refuse rather than start something we cannot protect.
   if (!(await git.isRepo())) {
@@ -155,19 +174,64 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
     );
   }
 
-  // ---- Branch
-  let branch = `night/${branchSlug(objective)}`;
-  for (let suffix = 1; await git.branchExists(branch); suffix += 1) {
-    branch = `night/${branchSlug(objective)}-${suffix}`;
+  // ---- Branch. A resumed run keeps its own; a new one takes the next free
+  // name, so a second night on the same objective never lands on the first's
+  // commits.
+  let branch = resuming?.night?.branch ?? `night/${branchSlug(objective)}`;
+  if (!resuming) {
+    for (let suffix = 1; await git.branchExists(branch); suffix += 1) {
+      branch = `night/${branchSlug(objective)}-${suffix}`;
+    }
   }
-  await git.createOrSwitchBranch(branch);
 
-  const runId = randomUUID().slice(0, 8);
+  if (argv.worktree && !resuming) {
+    // A worktree means the user keeps their checkout while the night runs.
+    // The run's project path becomes the worktree, which is also what the
+    // envelope bounds writes to.
+    const worktreeDir = path.join(
+      path.dirname(projectPath),
+      `${path.basename(projectPath)}-night-worktrees`,
+      branchSlug(objective),
+    );
+    try {
+      await git.addWorktree(worktreeDir, branch);
+    } catch (error) {
+      fail(
+        `Error: could not create the worktree at ${worktreeDir}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    projectPath = worktreeDir;
+    git = createGitOps(projectPath);
+    console.log(`worktree: ${worktreeDir}`);
+  } else {
+    await git.createOrSwitchBranch(branch);
+  }
+
+  // Where the branch started, for the report's diffstat. Captured before the
+  // run adds to it.
+  const baseCommit = (await git.headHash()) ?? "HEAD";
+
+  const runId = resuming?.runId ?? randomUUID().slice(0, 8);
+  const night = {
+    objective,
+    branch,
+    stopWhen: argv.stopWhen,
+    verifyCommand: argv.verify,
+    fallbackModel: argv.fallbackModel,
+    // A resumed run continues the first one's numbering and commit list, so
+    // the report covers the whole night rather than the last leg of it.
+    iterations: resuming?.night?.iterations ?? 0,
+    commits: resuming?.night?.commits ?? [],
+    waitedMs: resuming?.night?.waitedMs ?? 0,
+    fallbackIterations: resuming?.night?.fallbackIterations ?? [],
+  };
   writeManifest({
     runId,
     status: "running",
-    createdAt: Date.now(),
-    startedAt: Date.now(),
+    createdAt: resuming?.createdAt ?? Date.now(),
+    startedAt: resuming?.startedAt ?? Date.now(),
     projectPath,
     provider: provider!,
     model,
@@ -176,15 +240,18 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
       ...(argv.maxIterations ? { maxTurns: argv.maxIterations } : {}),
       ...(argv.maxUsd !== undefined ? { maxUsd: argv.maxUsd } : {}),
     },
-    usage: EMPTY_USAGE,
+    usage: resuming?.usage ?? EMPTY_USAGE,
     turns: 0,
-    verifyCommand: "",
+    verifyCommand: argv.verify ?? "",
     pid: process.pid,
     taskCardCount: 0,
+    night,
   });
   store.appendNotes(
     runId,
-    `# Night run ${runId}\n\nObjective: ${objective}\n\nBranch: ${branch}`,
+    resuming
+      ? `# Resumed ${new Date().toISOString()}\n\nThe previous leg ended as ${resuming.status}.`
+      : `# Night run ${runId}\n\nObjective: ${objective}\n\nBranch: ${branch}`,
   );
 
   // ---- Interrupts (§4.8). First Ctrl+C finishes the current iteration; the
@@ -230,6 +297,18 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
     ].join("\n"),
   );
 
+  // Pushing is the ORCHESTRATOR's act, after a commit — never the model's, which
+  // the envelope denies outright. A failed push is reported and does not stop
+  // the night: the commit is already safe locally.
+  let pushFailed = false;
+  const pushBranch = async (): Promise<void> => {
+    const pushed = await git.push(branch);
+    if (!pushed.ok && !pushFailed) {
+      pushFailed = true;
+      console.log(`  push failed (reported once): ${pushed.error ?? "unknown"}`);
+    }
+  };
+
   const result = await runNight(
     {
       runIteration: (input) =>
@@ -274,10 +353,40 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
           }
         : {}),
       sleepUntil: (at) => sleepUntil(at, () => stop.graceful || stop.hard),
-      record: (record) => store.appendIteration(runId, record),
+      record: (record) => {
+        store.appendIteration(runId, record);
+        // Keep the manifest current so `freecode night status` from another
+        // terminal reads real progress, and so a crash leaves an accurate
+        // account rather than the startup snapshot.
+        if (record.kind === "iteration") {
+          updateManifest(runId, (m) => ({
+            ...m,
+            night: m.night && {
+              ...m.night,
+              iterations: Math.max(m.night.iterations, record.n),
+              commits: record.commit
+                ? [...m.night.commits, record.commit]
+                : m.night.commits,
+            },
+          }));
+          if (record.commit && argv.push) void pushBranch();
+        } else {
+          updateManifest(runId, (m) => ({
+            ...m,
+            night: m.night && {
+              ...m.night,
+              waitedMs: m.night.waitedMs + Math.max(0, record.until - record.from),
+            },
+          }));
+        }
+      },
       decision: (d) => store.appendDecision(runId, d),
       now: () => Date.now(),
-      stopRequested: () => stop.graceful || stop.hard,
+      // `freecode night stop` from another terminal sets this in the manifest.
+      // Read at the boundary rather than signalled: a process killed mid-write
+      // is how manifests corrupt.
+      stopRequested: () =>
+        stop.graceful || stop.hard || readManifest(runId)?.cancelRequested === true,
       hardStopped: () => stop.hard,
       report: (line) => console.log(line),
     },
@@ -286,6 +395,7 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
       maxUsd: argv.maxUsd,
       until,
       maxWaitMs: maxWaitMs ?? DEFAULT_MAX_WAIT_MS,
+      startIteration: resuming?.night?.iterations ?? 0,
       fallbackModel: argv.fallbackModel,
       stopWhen: argv.stopWhen,
       maxConsecutiveFailures: DEFAULT_MAX_CONSECUTIVE_FAILURES,
@@ -293,11 +403,35 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
   );
   inhibitor.release();
 
-  updateManifest(runId, (m) => ({
+  const finished = updateManifest(runId, (m) => ({
     ...m,
     status: result.stopReason === "objective_met" ? "completed" : "stopped",
     endedAt: Date.now(),
+    usage: { ...m.usage, usd: (resuming?.usage.usd ?? 0) + result.usd },
+    night: m.night && {
+      ...m.night,
+      // Cumulative across legs. `iterations` is already absolute (the
+      // orchestrator numbers from the resume offset); the rest would otherwise
+      // be overwritten with this leg's totals and lose the first night's work.
+      iterations: Math.max(m.night.iterations, result.iterations),
+      commits: [...new Set([...m.night.commits, ...result.commits])],
+      waitedMs: night.waitedMs + result.waitedMs,
+      fallbackIterations: [
+        ...new Set([...m.night.fallbackIterations, ...result.fallbackIterations]),
+      ],
+      stopReason: result.stopReason,
+      uncommitted: result.uncommitted,
+    },
   }));
+
+  // The morning report, written where `freecode night report` will regenerate
+  // it from the same logs if this process never got the chance.
+  if (finished?.night) {
+    buildReport(finished, {
+      diffstat: await git.diffstatAgainst(baseCommit),
+      subjects: await git.subjectsSince(baseCommit),
+    });
+  }
 
   // ---- Exit summary (§4.10 v0: terminal only; report.md is Phase 3).
   const decisions = store.readDecisions(runId);
@@ -335,6 +469,7 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
             .join("\n")}`
         : "",
       "",
+      `  report:  freecode night report ${runId}`,
       `  review:  git log --oneline ${branch}`,
       `  details: ${path.dirname(store.notesPath(runId))}`,
       "",

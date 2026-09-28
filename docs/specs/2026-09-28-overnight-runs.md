@@ -792,11 +792,37 @@ Each phase is shippable and revertible on `autonomous`.
   resumes to a timer that never fired — and the tick gives a graceful stop
   somewhere to land, so Ctrl+C does not have to wait out a quota window.
 
-**Phase 3 — The morning.**
+**Phase 3 — The morning.** **Built 2026-09-28.**
 - `report.md` + `freecode night report|status|list|stop`; resume on a
   `night/*` branch; crashed-run detection; `--worktree`; `--push`.
-- *Verify:* kill -9 mid-iteration → `status` says crashed → resume continues
-  numbering → report regenerates.
+- *Verify:* `report.test.ts` (14) + `night-ops.test.ts` (11), plus the live
+  kill -9 walkthrough below.
+
+  As built: `report.ts` is a **pure fold** (manifest + the two jsonl logs →
+  markdown), which is what lets `freecode night report` regenerate one for a
+  run that never reached its own exit path. Order is load-bearing: needs-you
+  first even when empty (a section that vanishes is indistinguishable from one
+  a bug dropped), then decisions with **irreversible sorted first**, then
+  refusals, waits, iterations, diffstat, and a review block that ends with how
+  to throw the whole night away. An ask with no matching decision is printed as
+  "answer not recorded" rather than hidden. An unpriced model reports "cost
+  unknown", never $0.
+
+  Crash detection is `pidAlive()` (`kill(pid, 0)`) reconciled **on read**, so
+  `status` and `list` agree and a resume knows what it found; a finished run is
+  never re-judged by its long-gone pid. `freecode night` on a `night/*` branch
+  resumes that run — the branch is the handle, because it is what the user
+  still has once the terminal is gone — and continues the first leg's iteration
+  numbering, commit list and wait total, so the report covers the whole night.
+  `night stop` sets `cancelRequested` in the manifest and the orchestrator
+  reads it at the iteration boundary; nothing is signalled, because a process
+  killed mid-write is how manifests corrupt.
+
+  One fix this phase forced: the sidecar logs scrubbed the **serialized JSON
+  line**, so a `needs_human` item quoting a credential produced a line that was
+  no longer JSON, which the reader then skipped — the record vanished instead
+  of appearing redacted. `scrubFields` now walks the record's string fields, so
+  the user is still told something needs them.
 
 **Phase 4 — Frontends.** `/night` in the TUI (start with the same flags, show
 live status from the manifest, open the report); notification on finish via the

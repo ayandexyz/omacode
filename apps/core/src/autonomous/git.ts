@@ -34,6 +34,14 @@ export interface GitOps {
   /** Discard everything since the last commit, tracked and untracked. */
   reset(): Promise<void>;
   headHash(): Promise<string | undefined>;
+  /** Push the run's branch. Never forced, never to another branch. */
+  push(branch: string): Promise<{ ok: boolean; error?: string }>;
+  /** `--stat` against the branch point, for the morning report. */
+  diffstatAgainst(base: string): Promise<string>;
+  /** Commit subjects on the run's branch, keyed by full hash. */
+  subjectsSince(base: string): Promise<Record<string, string>>;
+  /** Create a worktree for the branch and return its path. */
+  addWorktree(dir: string, branch: string): Promise<void>;
 }
 
 export function createGitOps(cwd: string): GitOps {
@@ -130,6 +138,50 @@ export function createGitOps(cwd: string): GitOps {
       } catch {
         return undefined; // no commits yet
       }
+    },
+
+    async push(branch) {
+      try {
+        // Explicit refspec, no --force, no upstream tracking games: the only
+        // branch this run may ever touch is its own.
+        await git(cwd, ["push", "origin", `${branch}:${branch}`]);
+        return { ok: true };
+      } catch (error) {
+        const err = error as { stderr?: string; message?: string };
+        return { ok: false, error: (err.stderr || err.message || "").trim() };
+      }
+    },
+
+    async diffstatAgainst(base) {
+      try {
+        // Three dots: what the branch added, not what `base` moved on to.
+        const { stdout } = await git(cwd, ["diff", "--stat", `${base}...HEAD`]);
+        return stdout;
+      } catch {
+        return "";
+      }
+    },
+
+    async subjectsSince(base) {
+      try {
+        const { stdout } = await git(cwd, [
+          "log",
+          "--format=%H%x00%s",
+          `${base}..HEAD`,
+        ]);
+        const out: Record<string, string> = {};
+        for (const line of stdout.split("\n")) {
+          const [hash, subject] = line.split("\0");
+          if (hash && subject) out[hash] = subject;
+        }
+        return out;
+      } catch {
+        return {};
+      }
+    },
+
+    async addWorktree(dir, branch) {
+      await git(cwd, ["worktree", "add", "-b", branch, dir]);
     },
   };
 }

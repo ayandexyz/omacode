@@ -146,6 +146,9 @@ export interface RunManifest {
   cancelRequested?: boolean;
 
   taskCardCount: number;
+
+  /** Present on a `freecode night` run, absent on an old autonomous one. */
+  night?: NightManifestFields;
 }
 
 // =============================================================================
@@ -154,6 +157,31 @@ export interface RunManifest {
 // verifiable step, ending in a `finish_iteration` call. The orchestrator, not
 // the model, commits, resets, and decides when the night is over.
 // =============================================================================
+
+/**
+ * The night-run fields on a `RunManifest`. Kept in one optional block rather
+ * than spread across the manifest: Phase 0's shape belongs to the older
+ * autonomous design, and a night run should not have to pretend to be one.
+ *
+ * Updated after every iteration, so `freecode night status` from another
+ * terminal reads real progress rather than whatever was true at startup.
+ */
+export interface NightManifestFields {
+  objective: string;
+  branch: string;
+  stopWhen?: string;
+  verifyCommand?: string;
+  /** Iterations attempted so far (a retried wait does not increment it). */
+  iterations: number;
+  /** Commit hashes on the run's branch, oldest first. */
+  commits: string[];
+  waitedMs: number;
+  fallbackIterations: number[];
+  fallbackModel?: string;
+  stopReason?: string;
+  /** Left in the tree when the run ended. Absent means nothing was. */
+  uncommitted?: string[];
+}
 
 /** What the model reports through `finish_iteration` (§4.4). */
 export interface FinishIterationResult {

@@ -51,6 +51,13 @@ export interface NightLimits {
   fallbackModel?: string;
   /** Natural-language finish line, handed to the model each iteration. */
   stopWhen?: string;
+  /**
+   * Iterations already done by an earlier leg of this run (a resume).
+   * Numbering continues from here: restarting at 1 would produce a second
+   * `night 1:` commit on a branch that already has one, and the report would
+   * describe two different steps by the same number.
+   */
+  startIteration?: number;
 }
 
 export const DEFAULT_MAX_CONSECUTIVE_FAILURES = 3;
@@ -130,7 +137,7 @@ export async function runNight(
 ): Promise<NightResult> {
   const commits: string[] = [];
   const fallbackIterations: number[] = [];
-  let iteration = 0;
+  let iteration = limits.startIteration ?? 0;
   let consecutiveFailures = 0;
   let usd = 0;
   let waitedMs = 0;
@@ -149,7 +156,10 @@ export async function runNight(
       stopReason = "cancelled";
       break;
     }
-    if (limits.maxIterations !== undefined && iteration >= limits.maxIterations) {
+    if (
+      limits.maxIterations !== undefined &&
+      iteration - (limits.startIteration ?? 0) >= limits.maxIterations
+    ) {
       stopReason = "max_iterations";
       break;
     }
