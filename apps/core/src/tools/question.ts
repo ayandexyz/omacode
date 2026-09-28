@@ -286,7 +286,8 @@ async function executeQuestion(
 
 export const QuestionTool: Tool<QuestionParams> = buildTool({
   id: "question",
-  description: "Ask the user clarifying questions during execution",
+  description:
+    "Ask the user structured questions during execution, including when the user explicitly requests this tool",
   schemas: {
     parameters: questionSchema,
   },

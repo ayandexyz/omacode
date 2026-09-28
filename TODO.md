@@ -63,6 +63,16 @@ smaller threshold or fewer modules, and either way one more calibration run
 (~$0.025) to confirm it still compacts 3/3. Not worth doing on its own; worth
 folding into the next change that touches the case.
 
+### Evals cannot answer a `question` call (found 2026-09-29)
+
+`eval/runner.ts` rejects every `question_asked` (`questionsRejected`), so no
+case can observe what a model does with an ANSWER. Session
+2041efa4-42cc-47bc-b039-9b65cac666d5 (MiniMax-M3) is the failure this hides:
+one requested question, then four more, then a self-assigned command-palette
+build that auto-poke kept alive. `explicit-question-tool-once` covers only
+the refusal half. Fix: an optional per-case scripted answer (e.g.
+`answers: ["Just exploring"]`) the runner replies with instead of rejecting.
+
 ### Settled background shells are retained until dismissed (added 2026-09-08)
 
 **Status:** known, bounded, low priority.
