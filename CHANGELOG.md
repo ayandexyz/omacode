@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.43.0
+
+Overnight runs. `freecode night "<objective>"` works unattended: a loop of short, fresh-session iterations, each ending in a `finish_iteration` call, with the orchestrator — not the model — committing successes to a `night/<slug>` branch and resetting failures. Nothing waits on a human; a spent subscription window is waited out; the morning report leads with what needs you. Alongside it, the model no longer refuses an explicit request to use the `question` tool, and MiniMax and Gemini get small, measured prompt overlays.
+
+### Added
+
+- **`freecode night`** (`966654bd`, `859db0a3`, `82f3c0bc`, `62c7e04c`, `de1364cf`). One limit is required (`--until 07:00`, `--max-iterations N` or `--max-usd N`). Preflight refuses a dirty tree, a non-repo and a detached HEAD; three consecutive failures abort. Questions answer themselves and are recorded; permissions go through a fixed envelope (no git history rewrites, push, publish or sudo; writes only inside the run tree). A guard rail, not a sandbox — what bounds the damage is reset-on-failure plus its own branch. Spec: `docs/specs/2026-09-28-overnight-runs.md`; guide: `guides/overnight-runs`.
+  - **Surviving the night:** a spent quota is waited out to its reset (+60s), probed when no reset is stated, capped by `--max-wait` (12h) and `--until`; credits/auth abort. `--fallback-model`, `--verify '<cmd>'` gating each commit, `--stop-when`, and a sleep inhibitor.
+  - **The morning:** `freecode night status|report|list|stop [id]`, resolved by id or branch. The report puts needs-you first, then decisions (irreversible first), refusals, waits, commits, diffstat and cost. Running `freecode night` on a `night/*` branch resumes it.
+  - **`/night` in the TUI:** a read-only roster; Enter opens the report, `k` asks a running night to stop. A finished run fires the Notification hook.
+  - **Detach, schedule, sandbox:** `--detach` / `--at <HH:MM|90m|ISO>` run a detached worker in its own worktree. `--sandbox` (on by default) wraps unattended bash, `--verify` and background shells in bubblewrap. `--worktree`, `--push`, `--commit-style conventional`.
+- **Typed loop failures and quota evidence** (`70cf15fe`). `QuotaExhaustedError` (scope, reset time, provider) and `LoopResult.failure`, filled at every exit; `model.error` records rate-limit header names and values.
+- **Model-family prompt overlays** (`813210ad`). One canonical system prompt plus a short overlay per family, routed by model id then provider (so gateways resolve too). MiniMax and Gemini ship text; GPT and Kimi are routed but empty until measured. `FREECODE_MODEL_OVERLAY=0` turns them off.
+- **`evals/night.jsonl`** (`b806f5e6`): unattended-iteration compliance suite.
+
+### Changed
+
+- **The TUI input sits right under the conversation** (`d4290938`) instead of being pinned to the bottom row; it reaches the bottom once history fills the screen. The notice and jump pill follow it.
+- **A headless ask fails fast** (`70cf15fe`). `askQuestion` with no subscriber rejects at once instead of waiting out the 30-minute prompt timeout.
+
+### Fixed
+
+- **An explicit request to use the `question` tool is honoured** (`76bef6b0`). The system prompt reserved the tool for "genuine forks" and MiniMax quoted that back as a refusal; the restraint now applies only when the model decides to ask on its own, and an answer refines the existing request instead of starting new work.
+- **Envelope bypasses** (`bfc6c24a`): chained, path-qualified (`/usr/bin/git`) and env-prefixed git commands no longer slip past the deny rules.
+- **Bugs from the first live detached runs** (`25be4799`): tools ran in the user's checkout instead of the worktree; failed iterations lost their session id, cost and learnings; the report's review range was hard-coded to `main`; git and home-installed toolchains failed inside the sandbox; MiniMax's garbled nested `finish_iteration` args are untangled.
+- **A resumed night requires a limit** (`b85ce1c9`), like a fresh start.
+- **Docs deploy** (`d19297e0`, `0ab7858d`): an unanchored `docs` in `.vercelignore` removed `apps/docs` from its own Vercel build.
+
+### Notes
+
+`evals/night.jsonl` on MiniMax-M3: 5/5 cases, `finish_iteration` in 14/15 trials before the live-run fixes and 15/15 after. Overlay A/Bs on the trajectory suite (×5): MiniMax 134 → 139/150 with repeated calls 9 → 2; Gemini 3.6 Flash 127 → 130/150 at −1.2% cost; no majority regressions on either. The question-tool wording measured neutral on MiniMax (the refusal did not reproduce in-eval). Tests: core 1833/1833, TUI 329/329, typecheck clean.
+
 ## v0.42.0
 
 Background work. A subagent or a shell no longer has to hold the turn: `agent(run_in_background: true)` and `bash(run_in_background: true)` return at once, and the result comes back as a task notification — steered into the running turn, or starting one if the session is idle. The parent can steer or stop a running subagent, pick its role from Claude Code-format agent files, and continue a finished one. On the memory side, automatic recall is now measured rather than assumed, and the retrieval judge is off by default because the measurement found it neutral.
