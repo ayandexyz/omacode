@@ -188,6 +188,7 @@ export type IterationFailureReason =
   | "stuck"
   | "timeout"
   | "commit_failed"
+  | "verify_failed"
   | "provider"
   | "quota"
   | "auth"
@@ -206,6 +207,21 @@ export interface IterationRecord {
   filesChanged?: number;
   usd?: number;
   turns: number;
+}
+
+/**
+ * One wait on a spent quota, written to `iterations.jsonl` beside the
+ * iterations so the morning can account for a night that produced three
+ * commits and eight hours of sleep.
+ */
+export interface WaitRecord {
+  kind: "wait";
+  /** The iteration that will be retried once the wait ends. */
+  n: number;
+  from: number;
+  until: number;
+  reason: string;
+  provider: string;
 }
 
 /** A denial or a self-answered question, for the morning report (§4.5, §4.6). */

@@ -7,6 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   DEFAULT_MAX_CONSECUTIVE_FAILURES,
+  DEFAULT_MAX_WAIT_MS,
   runNight,
   type NightLimits,
   type OrchestratorDeps,
@@ -37,6 +38,7 @@ interface Harness {
   records: IterationRecord[];
   notes: string[];
   lines: string[];
+  slept: Array<{ until: number }>;
   resets: number;
   commitCalls: string[];
   clock: { now: number };
@@ -48,8 +50,10 @@ function harness(opts: {
   outcomes: Array<{
     finish?: FinishIterationResult;
     failure?: IterationFailureReason;
+    quota?: { scope: "window" | "credits" | "unknown"; resetAt?: number; provider: string };
     usd?: number;
   }>;
+  verify?: boolean[];
   dirty?: boolean | boolean[];
   commit?: Array<{ ok: true; hash: string; filesChanged: number } | { ok: false; error: string }>;
 }): Harness {
@@ -57,16 +61,20 @@ function harness(opts: {
   const notes: string[] = [];
   const lines: string[] = [];
   const commitCalls: string[] = [];
+  const slept: Array<{ until: number }> = [];
   const clock = { now: 1_000 };
   const stop = { graceful: false, hard: false };
   let resets = 0;
   let dirtyCall = 0;
   let commitCall = 0;
+  let attempt = 0;
+  let verifyCall = 0;
 
   const h: Harness = {
     records,
     notes,
     lines,
+    slept,
     get resets() {
       return resets;
     },
@@ -75,13 +83,16 @@ function harness(opts: {
     stop,
     deps: {
       async runIteration({ iteration }) {
-        const o =
-          opts.outcomes[iteration - 1] ?? opts.outcomes[opts.outcomes.length - 1]!;
+        // Indexed by ATTEMPT, not by iteration number: a wait retries the same
+        // number, and the retry must be able to succeed where the first failed.
+        const o = opts.outcomes[attempt] ?? opts.outcomes[opts.outcomes.length - 1]!;
+        attempt += 1;
         clock.now += 60_000;
         return {
           sessionId: `s-${iteration}`,
           finish: o.finish,
           failure: o.failure,
+          quota: o.quota,
           turns: 4,
           usd: o.usd,
         };
@@ -106,7 +117,19 @@ function harness(opts: {
         read: () => notes.join("\n"),
         append: (s) => notes.push(s),
       },
-      record: (r) => records.push(r),
+      ...(opts.verify
+        ? {
+            verify: async () => {
+              const ok = opts.verify![verifyCall++] ?? true;
+              return { ok, output: ok ? "all good" : "3 tests failed\nassert: 1 !== 2" };
+            },
+          }
+        : {}),
+      sleepUntil: async (until) => {
+        slept.push({ until });
+        clock.now = until; // the fake clock jumps the whole wait
+      },
+      record: (r) => records.push(r as IterationRecord),
       decision: () => {},
       now: () => clock.now,
       stopRequested: () => stop.graceful,
@@ -120,6 +143,7 @@ function harness(opts: {
 const limits = (over: Partial<NightLimits> = {}): NightLimits => ({
   maxConsecutiveFailures: DEFAULT_MAX_CONSECUTIVE_FAILURES,
   maxIterations: 10,
+  maxWaitMs: DEFAULT_MAX_WAIT_MS,
   ...over,
 });
 
@@ -329,4 +353,182 @@ test("each iteration sees the notes the previous ones wrote", async () => {
   assert.equal(seen[0], "", "the first iteration has no notes");
   assert.match(seen[1] ?? "", /Iteration 1 — did a thing/);
   assert.ok((seen[2]?.length ?? 0) > (seen[1]?.length ?? 0));
+});
+
+// ---------------------------------------------------------------------------
+// Phase 2 — surviving the night (spec §4.7)
+// ---------------------------------------------------------------------------
+
+const HOUR = 3_600_000;
+
+test("a spent window is waited out and the SAME iteration is retried", async () => {
+  const h = harness({
+    outcomes: [
+      { failure: "quota", quota: { scope: "window", resetAt: 1_000 + 2 * HOUR, provider: "anthropic" } },
+      { finish: finish({ shouldStop: true }) },
+    ],
+  });
+  const result = await runNight(h.deps, limits());
+
+  assert.equal(h.slept.length, 1);
+  // Numbering it twice would claim work that was never attempted.
+  assert.equal(result.iterations, 1);
+  assert.equal(result.commits.length, 1);
+  assert.deepEqual(h.commitCalls, ["night 1: did a thing"]);
+  assert.ok(result.waitedMs > 0);
+  assert.equal(result.stopReason, "objective_met");
+});
+
+test("a wait is not a failure — it does not spend a rollback slot", async () => {
+  const h = harness({
+    outcomes: [
+      { failure: "quota", quota: { scope: "window", resetAt: 1_000 + HOUR, provider: "x" } },
+      { failure: "quota", quota: { scope: "window", resetAt: 1_000 + 2 * HOUR, provider: "x" } },
+      { failure: "quota", quota: { scope: "window", resetAt: 1_000 + 3 * HOUR, provider: "x" } },
+      { failure: "quota", quota: { scope: "window", resetAt: 1_000 + 4 * HOUR, provider: "x" } },
+      { finish: finish({ shouldStop: true }) },
+    ],
+  });
+  const result = await runNight(h.deps, limits());
+  // Four waits in a row, well past maxConsecutiveFailures, and the run lives.
+  assert.equal(h.slept.length, 4);
+  assert.equal(result.stopReason, "objective_met");
+});
+
+test("the tree is reset before waiting, so the retry starts clean", async () => {
+  const h = harness({
+    outcomes: [
+      { failure: "quota", quota: { scope: "window", resetAt: 1_000 + HOUR, provider: "x" } },
+      { finish: finish({ shouldStop: true }) },
+    ],
+  });
+  await runNight(h.deps, limits());
+  assert.equal(h.resets, 1);
+});
+
+test("a wait is recorded with its window, for the morning's accounting", async () => {
+  const h = harness({
+    outcomes: [
+      { failure: "quota", quota: { scope: "window", resetAt: 1_000 + HOUR, provider: "anthropic" } },
+      { finish: finish({ shouldStop: true }) },
+    ],
+  });
+  await runNight(h.deps, limits());
+  const wait = h.records.find((r) => (r as { kind: string }).kind === "wait") as unknown as {
+    n: number;
+    provider: string;
+    until: number;
+  };
+  assert.ok(wait, "the wait must appear in the log beside the iterations");
+  assert.equal(wait.n, 1);
+  assert.equal(wait.provider, "anthropic");
+});
+
+test("spent credits abort — no reset is ever coming", async () => {
+  const h = harness({
+    outcomes: [{ failure: "quota", quota: { scope: "credits", provider: "minimax" } }],
+  });
+  const result = await runNight(h.deps, limits());
+  assert.equal(result.stopReason, "permanent_error");
+  assert.equal(h.slept.length, 0, "waiting on an empty account is pure waste");
+});
+
+test("a wait that would outlast --max-wait stops the run instead", async () => {
+  const h = harness({
+    outcomes: [{ failure: "quota", quota: { scope: "window", resetAt: 1_000 + 5 * HOUR, provider: "x" } }],
+  });
+  const result = await runNight(h.deps, limits({ maxWaitMs: HOUR }));
+  assert.equal(result.stopReason, "wait_budget");
+  assert.equal(h.slept.length, 0);
+});
+
+test("a wait that would cross --until stops the run instead of sleeping past morning", async () => {
+  const h = harness({
+    outcomes: [{ failure: "quota", quota: { scope: "window", resetAt: 1_000 + 5 * HOUR, provider: "x" } }],
+  });
+  const result = await runNight(h.deps, limits({ until: 1_000 + 2 * HOUR }));
+  assert.equal(result.stopReason, "deadline");
+  assert.equal(h.slept.length, 0);
+});
+
+test("--fallback-model spends itself on the first window instead of waiting", async () => {
+  const h = harness({
+    outcomes: [
+      { failure: "quota", quota: { scope: "window", resetAt: 1_000 + HOUR, provider: "anthropic" } },
+      { finish: finish() },
+      { failure: "quota", quota: { scope: "window", resetAt: 1_000 + 2 * HOUR, provider: "anthropic" } },
+      { finish: finish({ shouldStop: true }) },
+    ],
+  });
+  const seen: boolean[] = [];
+  const inner = h.deps.runIteration;
+  h.deps.runIteration = async (input) => {
+    seen.push(input.useFallback === true);
+    return inner(input);
+  };
+
+  const result = await runNight(h.deps, limits({ fallbackModel: "minimax/MiniMax-M3" }));
+  // First window: retried on the fallback, no sleep. Second: the fallback is
+  // spent, so it waits like any other.
+  assert.deepEqual(seen, [false, true, false, false]);
+  assert.deepEqual(result.fallbackIterations, [1]);
+  assert.equal(h.slept.length, 1);
+  assert.equal(result.stopReason, "objective_met");
+});
+
+test("without --fallback-model the run never changes models", async () => {
+  const h = harness({
+    outcomes: [
+      { failure: "quota", quota: { scope: "window", resetAt: 1_000 + HOUR, provider: "x" } },
+      { finish: finish({ shouldStop: true }) },
+    ],
+  });
+  const result = await runNight(h.deps, limits());
+  assert.deepEqual(result.fallbackIterations, []);
+  assert.equal(h.slept.length, 1);
+});
+
+test("a failing --verify discards the work instead of committing it", async () => {
+  const h = harness({
+    outcomes: [{ finish: finish() }, { finish: finish({ shouldStop: true }) }],
+    verify: [false, true],
+  });
+  const result = await runNight(h.deps, limits());
+
+  assert.equal(h.commitCalls.length, 1, "only the verified iteration commits");
+  assert.deepEqual(h.commitCalls, ["night 2: did a thing"]);
+  assert.equal(h.resets, 1);
+  assert.equal(h.records[0]?.failure, "verify_failed");
+  assert.equal(result.stopReason, "objective_met");
+});
+
+test("the verify output reaches the notes, so the next iteration can act on it", async () => {
+  const h = harness({
+    outcomes: [{ finish: finish() }],
+    verify: [false],
+  });
+  await runNight(h.deps, limits({ maxIterations: 1 }));
+  assert.match(h.notes.join("\n"), /assert: 1 !== 2/);
+});
+
+test("three verify failures in a row end the run", async () => {
+  const h = harness({
+    outcomes: [{ finish: finish() }],
+    verify: [false, false, false],
+  });
+  const result = await runNight(h.deps, limits({ maxIterations: 20 }));
+  assert.equal(result.stopReason, "consecutive_failures");
+  assert.equal(result.iterations, 3);
+  assert.equal(h.commitCalls.length, 0);
+});
+
+test("verify does not run for a learnings-only iteration — there is nothing to gate", async () => {
+  const h = harness({
+    outcomes: [{ finish: finish({ keyLearnings: ["a thing"], shouldStop: true }) }],
+    dirty: false,
+    verify: [false],
+  });
+  const result = await runNight(h.deps, limits());
+  assert.equal(result.stopReason, "objective_met");
+  assert.equal(h.resets, 0);
 });

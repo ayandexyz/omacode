@@ -768,11 +768,29 @@ Each phase is shippable and revertible on `autonomous`.
   that starts inside the window may finish outside it, and killing it mid-step
   would discard real work.
 
-**Phase 2 — Surviving the night.**
+**Phase 2 — Surviving the night.** **Built 2026-09-28.**
 - Quota waits (§4.7) + `--max-wait` + `--fallback-model`; sleep inhibition;
   `--verify`; `--stop-when`.
-- *Verify:* integration test with a fake window; one real overnight run on this
-  repo with a harmless objective, report attached to the PR.
+- *Verify:* `quota-wait.test.ts` (13 cases — one per row of §4.7's table,
+  including a reset in the past, a 24h cap on a weekly limit, and the budget
+  checked against what a wait WOULD cost) + 13 new `orchestrator.test.ts` cases
+  over a fake clock. Sleep inhibition smoke-tested live on Linux (held, then
+  released — the first attempt reported a leak that was an artefact of the test
+  matching its own `pgrep` shell). **Still open:** one real overnight run on
+  this repo with a harmless objective.
+
+  As built: `quota-wait.ts` is pure policy (`planQuotaWait`, no clock of its
+  own) and `inhibit.ts` spawns one child it can kill, rather than gnhf's self
+  re-exec. A wait **retries the same iteration number** — nothing happened, so
+  numbering it twice would claim work that was never attempted — and is not a
+  failure, so four waits in a row do not reach `maxConsecutiveFailures`. The
+  tree is reset BEFORE waiting, so the retry starts clean. `--verify` runs
+  before the commit, not after, and its output tail lands in the notes for the
+  next iteration; it is skipped for a learnings-only iteration, which has
+  nothing to gate. `sleepUntil` re-checks the wall clock every minute
+  (§5.2): one long `setTimeout` overflows past 2^31 ms and a suspended laptop
+  resumes to a timer that never fired — and the tick gives a graceful stop
+  somewhere to land, so Ctrl+C does not have to wait out a quota window.
 
 **Phase 3 — The morning.**
 - `report.md` + `freecode night report|status|list|stop`; resume on a

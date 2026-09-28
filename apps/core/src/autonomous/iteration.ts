@@ -34,6 +34,8 @@ export interface IterationInput {
   iteration: number;
   notes: string;
   repairPending?: string;
+  /** The user's finish line, handed to the model so it can report reaching it. */
+  stopWhen?: string;
   projectPath: string;
   provider: string;
   model?: string;
@@ -50,8 +52,12 @@ export interface IterationOutcome {
   sessionId: string;
   finish?: FinishIterationResult;
   failure?: IterationFailureReason;
-  /** Set when the failure was a quota rejection worth waiting out (Phase 2). */
-  quota?: { scope: "window" | "credits" | "unknown"; resetAt?: number };
+  /** Set when the failure was a quota rejection; decides whether to wait (§4.7). */
+  quota?: {
+    scope: "window" | "credits" | "unknown";
+    resetAt?: number;
+    provider: string;
+  };
   turns: number;
   usd?: number;
 }
@@ -155,6 +161,9 @@ export async function runIteration(
         quota = {
           scope: result.failure.scope,
           resetAt: result.failure.resetAt,
+          // The provider that actually refused, which may be a fallback in the
+          // recovery chain rather than the one the run started on.
+          provider: result.failure.provider || input.provider,
         };
       }
     } else if (!unattended.finish.success) {
@@ -167,7 +176,11 @@ export async function runIteration(
     const classified = classifyLoopFailure(error);
     failure = failureFromLoop(classified) ?? "provider";
     if (classified.kind === "quota") {
-      quota = { scope: classified.scope, resetAt: classified.resetAt };
+      quota = {
+        scope: classified.scope,
+        resetAt: classified.resetAt,
+        provider: classified.provider || input.provider,
+      };
     }
     logger.warn(
       `[night] iteration ${input.iteration} threw: ${

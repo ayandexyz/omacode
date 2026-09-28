@@ -6,17 +6,21 @@
 // unit-testable with fakes and a fake clock. Nothing here touches a provider,
 // a filesystem or a real clock directly.
 //
-// Phase 1: no quota waits (Phase 2), no --verify, no --stop-when, no report.md.
-// A quota failure aborts with `permanent_error` for now, which is the honest
-// Phase 1 behaviour: waiting is not built, so pretending to wait would hang.
-// Spec: docs/specs/2026-09-28-overnight-runs.md §4.2
+// Phase 2 adds surviving the night: a spent quota window is waited out and the
+// SAME iteration number is retried (a wait is not a failure), `--verify` gates
+// every commit, and `--stop-when` gives the run a finish line. Not built:
+// report.md, resume, --worktree, --push, detach (Phases 3–5).
+// Spec: docs/specs/2026-09-28-overnight-runs.md §4.2, §4.7
 // =============================================================================
 
+import { planQuotaWait } from "./quota-wait.js";
+import type { QuotaScope } from "../agent/recovery/manager.js";
 import type {
   Decision,
   FinishIterationResult,
   IterationFailureReason,
   IterationRecord,
+  WaitRecord,
 } from "./types.js";
 
 export type NightStopReason =
@@ -26,6 +30,8 @@ export type NightStopReason =
   | "budget_usd"
   | "consecutive_failures"
   | "permanent_error"
+  /** The run spent its whole `--max-wait` allowance waiting on a quota. */
+  | "wait_budget"
   | "interrupted"
   | "cancelled";
 
@@ -35,9 +41,21 @@ export interface NightLimits {
   until?: number;
   maxUsd?: number;
   maxConsecutiveFailures: number;
+  /** Total time the run may spend waiting on quota across the whole night. */
+  maxWaitMs: number;
+  /**
+   * `provider/model` to retry on instead of waiting, the FIRST time a window
+   * is spent. Off by default: without it the run never changes models, because
+   * a night of commits from a model the user did not choose is a surprise.
+   */
+  fallbackModel?: string;
+  /** Natural-language finish line, handed to the model each iteration. */
+  stopWhen?: string;
 }
 
 export const DEFAULT_MAX_CONSECUTIVE_FAILURES = 3;
+/** Two five-hour subscription windows, plus slack. */
+export const DEFAULT_MAX_WAIT_MS = 12 * 60 * 60 * 1000;
 
 /** What the orchestrator needs from the world. All of it faked in tests. */
 export interface OrchestratorDeps {
@@ -45,10 +63,14 @@ export interface OrchestratorDeps {
     iteration: number;
     notes: string;
     repairPending?: string;
+    /** Run this attempt on `--fallback-model` instead of the run's own. */
+    useFallback?: boolean;
   }): Promise<{
     sessionId: string;
     finish?: FinishIterationResult;
     failure?: IterationFailureReason;
+    /** Present when `failure` is `quota`; decides whether waiting can help. */
+    quota?: { scope: QuotaScope; resetAt?: number; provider: string };
     turns: number;
     usd?: number;
   }>;
@@ -66,7 +88,19 @@ export interface OrchestratorDeps {
     read(): string;
     append(section: string): void;
   };
-  record(record: IterationRecord): void;
+  /**
+   * The user's `--verify` command, run in the tree before every commit.
+   * Absent when they gave none — the run then commits whatever the model says
+   * worked, which is exactly as strong as the model's own checking.
+   */
+  verify?(): Promise<{ ok: boolean; output: string }>;
+  /**
+   * Sleep until `until` (epoch ms), returning early if the run is asked to
+   * stop. Wall-clock, not one long timer: a suspended laptop resumes to a
+   * timer that never fired, and setTimeout overflows past 2^31 ms.
+   */
+  sleepUntil(until: number): Promise<void>;
+  record(record: IterationRecord | WaitRecord): void;
   decision(decision: Decision): void;
   now(): number;
   /** True once the user asked to stop; checked between iterations. */
@@ -82,6 +116,10 @@ export interface NightResult {
   iterations: number;
   commits: string[];
   usd: number;
+  /** Total time spent waiting on a spent quota. Reported, never hidden. */
+  waitedMs: number;
+  /** Iterations that ran on `--fallback-model` rather than the run's own. */
+  fallbackIterations: number[];
   /** Set when work was left uncommitted — every case is reported (§5.6). */
   uncommitted?: string[];
 }
@@ -91,12 +129,20 @@ export async function runNight(
   limits: NightLimits,
 ): Promise<NightResult> {
   const commits: string[] = [];
+  const fallbackIterations: number[] = [];
   let iteration = 0;
   let consecutiveFailures = 0;
   let usd = 0;
+  let waitedMs = 0;
   let repairPending: string | undefined;
   let repairAttempts = 0;
   let stopReason: NightStopReason | undefined;
+  // A wait retries the SAME iteration number: nothing happened, so numbering it
+  // twice would make the report claim work that was never attempted.
+  let retrySameIteration = false;
+  let probes = 0;
+  let useFallback = false;
+  let fallbackSpent = false;
 
   for (;;) {
     if (deps.stopRequested()) {
@@ -118,15 +164,21 @@ export async function runNight(
       break;
     }
 
-    iteration += 1;
+    if (!retrySameIteration) iteration += 1;
+    retrySameIteration = false;
     const startedAt = deps.now();
-    deps.report(`iteration ${iteration}: working`);
+    deps.report(
+      `iteration ${iteration}: working${useFallback ? " (fallback model)" : ""}`,
+    );
 
     const outcome = await deps.runIteration({
       iteration,
       notes: deps.notes.read(),
       repairPending,
+      useFallback,
     });
+    if (useFallback) fallbackIterations.push(iteration);
+    useFallback = false;
     usd += outcome.usd ?? 0;
 
     const base = {
@@ -150,18 +202,76 @@ export async function runNight(
       break;
     }
 
-    // Permanent: waiting cannot fix an empty account or a bad key, and Phase 1
-    // does not wait for a spent window either (Phase 2 adds that).
-    if (
-      outcome.failure === "auth" ||
-      outcome.failure === "quota"
-    ) {
+    // Auth is permanent by definition: a key the provider rejects will not
+    // start working while we sleep.
+    if (outcome.failure === "auth") {
       await deps.git.reset();
-      deps.record({ ...base, failure: outcome.failure });
-      deps.report(`iteration ${iteration}: ${outcome.failure} — aborting`);
+      deps.record({ ...base, failure: "auth" });
+      deps.report(`iteration ${iteration}: authentication refused — aborting`);
       stopReason = "permanent_error";
       break;
     }
+
+    // A spent quota is the one failure that is not the model's fault and not
+    // worth a rollback slot: reset the tree, wait, and retry the same step.
+    if (outcome.failure === "quota") {
+      await deps.git.reset();
+      const quota = outcome.quota ?? { scope: "unknown" as QuotaScope, provider: "provider" };
+
+      // `--fallback-model`, when given, spends itself on the FIRST window
+      // rather than waiting. Opt-in: a night of commits from a model the user
+      // did not choose is a surprise, and surprises are what the report exists
+      // to prevent.
+      if (limits.fallbackModel && !fallbackSpent && quota.scope === "window") {
+        fallbackSpent = true;
+        useFallback = true;
+        retrySameIteration = true;
+        deps.record({ ...base, failure: "quota" });
+        deps.report(
+          `iteration ${iteration}: ${quota.provider} window spent — retrying on ${limits.fallbackModel}`,
+        );
+        continue;
+      }
+
+      const plan = planQuotaWait({
+        scope: quota.scope,
+        resetAt: quota.resetAt,
+        now: deps.now(),
+        probes,
+        waitedMs,
+        maxWaitMs: limits.maxWaitMs,
+        until: limits.until,
+        provider: quota.provider,
+      });
+
+      if (plan.action === "abort") {
+        deps.record({ ...base, failure: "quota" });
+        deps.report(`iteration ${iteration}: ${plan.reason} — stopping`);
+        stopReason = plan.stopReason;
+        break;
+      }
+
+      const from = deps.now();
+      deps.record({
+        kind: "wait",
+        n: iteration,
+        from,
+        until: plan.until,
+        reason: plan.reason,
+        provider: quota.provider,
+      });
+      deps.report(
+        `${plan.reason} — resumes ${new Date(plan.until).toLocaleTimeString()}`,
+      );
+      await deps.sleepUntil(plan.until);
+      waitedMs += Math.max(0, deps.now() - from);
+      probes += 1;
+      retrySameIteration = true;
+      continue;
+    }
+
+    // Any other outcome means the provider answered, so the probe streak ends.
+    probes = 0;
 
     const finish = outcome.finish;
     if (!finish || outcome.failure) {
@@ -196,6 +306,32 @@ export async function runNight(
         break;
       }
       continue;
+    }
+
+    // The gate the user chose, run before the commit rather than after: a
+    // commit that fails verification is work the morning has to unpick. It is
+    // exactly as strong as the command they gave — the report says whether
+    // there was one at all.
+    if (deps.verify) {
+      const verified = await deps.verify();
+      if (!verified.ok) {
+        await deps.git.reset();
+        consecutiveFailures += 1;
+        deps.record({ ...base, failure: "verify_failed", summary: finish.summary });
+        deps.notes.append(
+          `## Iteration ${iteration} — verification failed\n${finish.summary}\n\n` +
+            `The verify command rejected it, so the changes were discarded:\n` +
+            `${tail(verified.output)}`,
+        );
+        deps.report(
+          `iteration ${iteration}: verify failed — reset, ${consecutiveFailures} in a row`,
+        );
+        if (consecutiveFailures >= limits.maxConsecutiveFailures) {
+          stopReason = "consecutive_failures";
+          break;
+        }
+        continue;
+      }
     }
 
     const commit = await deps.git.commitAll(`night ${iteration}: ${finish.summary}`);
@@ -252,6 +388,8 @@ export async function runNight(
     iterations: iteration,
     commits,
     usd,
+    waitedMs,
+    fallbackIterations,
     ...(uncommitted.length > 0 ? { uncommitted } : {}),
   };
 
@@ -287,6 +425,14 @@ export async function runNight(
       `iteration ${iteration}: failed (${reason}) — reset, ${consecutiveFailures} in a row`,
     );
   }
+}
+
+/** The end of a verify failure, where the reason lives. */
+function tail(output: string, chars = 2000): string {
+  const trimmed = output.trimEnd();
+  return trimmed.length <= chars
+    ? trimmed
+    : `…\n${trimmed.slice(-chars)}`;
 }
 
 function noteFor(

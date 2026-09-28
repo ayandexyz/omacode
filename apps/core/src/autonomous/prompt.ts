@@ -36,10 +36,12 @@ export interface IterationPromptInput {
   notes: string;
   /** Set when the previous iteration's commit failed and its work is still in the tree. */
   repairPending?: string;
+  /** `--stop-when`: the user's own finish line, in their words. */
+  stopWhen?: string;
 }
 
 export function buildIterationPrompt(input: IterationPromptInput): string {
-  const { objective, iteration, notes, repairPending } = input;
+  const { objective, iteration, notes, repairPending, stopWhen } = input;
   const sections: string[] = [
     `You are working unattended towards the objective below. No human will read or
 answer anything until morning. This is iteration ${iteration} of an overnight run.`,
@@ -70,6 +72,13 @@ is final for this run; work around it or list it in needs_human.`,
     sections.push(`## Repair first
 The previous iteration's changes could not be committed: ${repairPending}
 The uncommitted changes are still in the tree. Fix what blocks the commit first.`);
+  }
+
+  if (stopWhen) {
+    sections.push(`## Stop condition
+The user will consider the run finished when: ${stopWhen}
+Set should_stop=true only when that is fully true after this iteration. If it is
+not yet true, keep should_stop false however much progress you made.`);
   }
 
   const trimmed = trimNotes(notes).trim();

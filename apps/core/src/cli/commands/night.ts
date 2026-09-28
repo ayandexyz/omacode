@@ -11,8 +11,21 @@ interface NightArgs {
   maxIterations?: number;
   maxUsd?: number;
   until?: string;
+  maxWait?: string;
+  fallbackModel?: string;
+  verify?: string;
+  stopWhen?: string;
+  inhibit: boolean;
   allow: string[];
   deny: string[];
+}
+
+/** `--max-wait 8h` / `90m` → ms. Returns undefined if unparseable. */
+export function parseDuration(value: string): number | undefined {
+  const match = /^(\d+(?:\.\d+)?)(m|h)$/.exec(value.trim());
+  if (!match) return undefined;
+  const n = Number.parseFloat(match[1]!);
+  return n * (match[2] === "h" ? 3_600_000 : 60_000);
 }
 
 /** `--until 07:00` or `--until 8h` → epoch ms. Returns undefined if unparseable. */
@@ -62,6 +75,31 @@ export const nightCommand: CommandModule<object, NightArgs> = {
       .option("until", {
         type: "string",
         describe: "wall-clock deadline: 07:00, or a duration like 8h",
+      })
+      .option("max-wait", {
+        type: "string",
+        describe:
+          "total time the run may spend waiting out a spent quota, e.g. 12h (default 12h)",
+      })
+      .option("fallback-model", {
+        type: "string",
+        describe:
+          "provider/model to retry on the first time a usage window is spent, instead of waiting",
+      })
+      .option("verify", {
+        type: "string",
+        describe:
+          "command that must exit 0 before each commit, e.g. 'pnpm test'",
+      })
+      .option("stop-when", {
+        type: "string",
+        describe: "finish line, in your words — the model decides when it is met",
+      })
+      .option("inhibit", {
+        type: "boolean",
+        default: true,
+        describe:
+          "keep the machine awake for the run (--no-inhibit to leave sleep alone)",
       })
       .option("allow", {
         type: "string",

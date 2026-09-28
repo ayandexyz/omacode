@@ -16,7 +16,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { containsSecret } from "../memory/graph/secret-filter.js";
 import { runDir } from "./run-store.js";
-import type { Decision, IterationRecord } from "./types.js";
+import type { Decision, IterationRecord, WaitRecord } from "./types.js";
 
 export const notesPath = (runId: string): string =>
   path.join(runDir(runId), "notes.md");
@@ -57,9 +57,10 @@ export function appendDecision(runId: string, decision: Decision): void {
   append(decisionsPath(runId), `${scrub(JSON.stringify(decision))}\n`);
 }
 
+/** Iterations and waits share one log: the night is both, in order. */
 export function appendIteration(
   runId: string,
-  record: IterationRecord,
+  record: IterationRecord | WaitRecord,
 ): void {
   append(iterationsPath(runId), `${scrub(JSON.stringify(record))}\n`);
 }
@@ -87,5 +88,7 @@ function readJsonl<T>(filePath: string): T[] {
 export const readDecisions = (runId: string): Decision[] =>
   readJsonl<Decision>(decisionsPath(runId));
 
-export const readIterations = (runId: string): IterationRecord[] =>
-  readJsonl<IterationRecord>(iterationsPath(runId));
+export const readIterations = (
+  runId: string,
+): Array<IterationRecord | WaitRecord> =>
+  readJsonl<IterationRecord | WaitRecord>(iterationsPath(runId));

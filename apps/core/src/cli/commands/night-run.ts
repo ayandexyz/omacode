@@ -8,7 +8,7 @@
 // =============================================================================
 
 import * as path from "path";
-import { parseUntil } from "./night.js";
+import { parseDuration, parseUntil } from "./night.js";
 
 interface NightCliArgs {
   objective: string[];
@@ -16,8 +16,38 @@ interface NightCliArgs {
   maxIterations?: number;
   maxUsd?: number;
   until?: string;
+  maxWait?: string;
+  fallbackModel?: string;
+  verify?: string;
+  stopWhen?: string;
+  inhibit: boolean;
   allow: string[];
   deny: string[];
+}
+
+/**
+ * Sleep in wall-clock steps, not one long timer.
+ *
+ * A single `setTimeout` to a reset eight hours out is wrong twice over: it
+ * overflows past 2^31 ms, and a suspended laptop resumes to a timer that never
+ * fired. Re-checking the clock every minute survives both, and gives the
+ * interrupt a place to land — a graceful stop should not have to wait out a
+ * quota window before it takes effect.
+ */
+const WAIT_TICK_MS = 60_000;
+
+function sleepUntil(
+  until: number,
+  shouldStop: () => boolean,
+): Promise<void> {
+  return new Promise((resolve) => {
+    const tick = (): void => {
+      if (shouldStop() || Date.now() >= until) return resolve();
+      const timer = setTimeout(tick, Math.min(WAIT_TICK_MS, until - Date.now()));
+      timer.unref?.();
+    };
+    tick();
+  });
 }
 
 export async function runNightCli(argv: NightCliArgs): Promise<void> {
@@ -26,9 +56,12 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
     fail("Error: no objective given. `freecode night \"<what to work on>\"`");
   }
 
-  const { runNight, DEFAULT_MAX_CONSECUTIVE_FAILURES } = await import(
-    "../../autonomous/orchestrator.js"
-  );
+  const { runNight, DEFAULT_MAX_CONSECUTIVE_FAILURES, DEFAULT_MAX_WAIT_MS } =
+    await import("../../autonomous/orchestrator.js");
+  const { inhibitSleep } = await import("../../autonomous/inhibit.js");
+  const { execFile } = await import("child_process");
+  const { promisify } = await import("util");
+  const exec = promisify(execFile);
   const { runIteration } = await import("../../autonomous/iteration.js");
   const { createGitOps, branchSlug } = await import("../../autonomous/git.js");
   const { ENVELOPE_DENY_RULES } = await import("../../autonomous/envelope.js");
@@ -102,6 +135,15 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
   if (argv.until && until === undefined) {
     fail(`Error: --until "${argv.until}" is not a time (07:00) or a duration (8h).`);
   }
+  const maxWaitMs = argv.maxWait ? parseDuration(argv.maxWait) : DEFAULT_MAX_WAIT_MS;
+  if (argv.maxWait && maxWaitMs === undefined) {
+    fail(`Error: --max-wait "${argv.maxWait}" is not a duration (8h, 90m).`);
+  }
+  if (argv.fallbackModel && !argv.fallbackModel.includes("/")) {
+    fail(
+      `Error: --fallback-model "${argv.fallbackModel}" must be provider/model.`,
+    );
+  }
   // An unbounded night has to be a choice, not a default (§4.12).
   if (
     argv.maxIterations === undefined &&
@@ -169,15 +211,21 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
     hardAbort.abort();
   });
 
+  const inhibitor = inhibitSleep(argv.inhibit);
+
   console.log(
     [
       `night run ${runId} on ${branch}`,
       `  objective: ${objective}`,
       `  model:     ${provider}${model ? `/${model}` : ""}`,
       `  limits:    ${describeLimits(argv, until)}`,
+      argv.verify ? `  verify:    ${argv.verify}` : "",
+      argv.stopWhen ? `  stop when: ${argv.stopWhen}` : "",
       `  notes:     ${path.dirname(store.notesPath(runId))}`,
       "",
-      "Note: closing the lid still suspends most laptops. Sleep inhibition arrives in Phase 2.",
+      inhibitor.kind === "none"
+        ? "Note: the machine may suspend mid-run — nothing is holding it awake."
+        : "Note: idle sleep is inhibited for this run, but closing the lid still suspends most laptops.",
       "",
     ].join("\n"),
   );
@@ -188,9 +236,13 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
         runIteration({
           ...input,
           objective,
+          stopWhen: argv.stopWhen,
           projectPath,
-          provider: provider!,
-          model,
+          // `--fallback-model` is spent on the first quota window, and only
+          // then: the orchestrator decides, this just resolves the string.
+          ...(input.useFallback && argv.fallbackModel
+            ? splitModel(argv.fallbackModel)
+            : { provider: provider!, model }),
           denyRules: [...ENVELOPE_DENY_RULES, ...argv.deny],
           allowRules: argv.allow,
           onDecision: (d) => store.appendDecision(runId, d),
@@ -201,6 +253,27 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
         read: () => store.readNotes(runId),
         append: (section) => store.appendNotes(runId, section),
       },
+      ...(argv.verify
+        ? {
+            verify: async () => {
+              try {
+                const { stdout, stderr } = await exec(argv.verify!, {
+                  cwd: projectPath,
+                  shell: true,
+                  maxBuffer: 8 * 1024 * 1024,
+                } as never);
+                return { ok: true, output: `${stdout}${stderr}` };
+              } catch (error) {
+                const e = error as { stdout?: string; stderr?: string; message?: string };
+                return {
+                  ok: false,
+                  output: `${e.stdout ?? ""}${e.stderr ?? ""}` || (e.message ?? ""),
+                };
+              }
+            },
+          }
+        : {}),
+      sleepUntil: (at) => sleepUntil(at, () => stop.graceful || stop.hard),
       record: (record) => store.appendIteration(runId, record),
       decision: (d) => store.appendDecision(runId, d),
       now: () => Date.now(),
@@ -212,9 +285,13 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
       maxIterations: argv.maxIterations,
       maxUsd: argv.maxUsd,
       until,
+      maxWaitMs: maxWaitMs ?? DEFAULT_MAX_WAIT_MS,
+      fallbackModel: argv.fallbackModel,
+      stopWhen: argv.stopWhen,
       maxConsecutiveFailures: DEFAULT_MAX_CONSECUTIVE_FAILURES,
     },
   );
+  inhibitor.release();
 
   updateManifest(runId, (m) => ({
     ...m,
@@ -235,6 +312,12 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
       `night ${runId} ended: ${result.stopReason}`,
       `  ${result.commits.length} commit${result.commits.length === 1 ? "" : "s"} on ${branch} over ${result.iterations} iteration${result.iterations === 1 ? "" : "s"}`,
       `  cost: ${result.usd > 0 ? `$${result.usd.toFixed(2)}` : "unknown (no pricing for this model)"}`,
+      result.waitedMs > 0
+        ? `  waited ${(result.waitedMs / 3_600_000).toFixed(1)}h on a spent quota`
+        : "",
+      result.fallbackIterations.length > 0
+        ? `  ran on the fallback model: iteration${result.fallbackIterations.length === 1 ? "" : "s"} ${result.fallbackIterations.join(", ")}`
+        : "",
       needsHuman.length > 0
         ? `\n  NEEDS YOU (${needsHuman.length}):\n${needsHuman
             .map((d) => `    - ${(d as { item: string }).item}`)
@@ -265,6 +348,13 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
   // The manifest is the record; a non-zero exit is for "the night did not do
   // what it was asked", which is only true when nothing was committed.
   process.exit(result.commits.length > 0 ? 0 : 1);
+}
+
+function splitModel(spec: string): { provider: string; model?: string } {
+  const slash = spec.indexOf("/");
+  return slash > 0
+    ? { provider: spec.slice(0, slash), model: spec.slice(slash + 1) }
+    : { provider: spec };
 }
 
 function describeLimits(argv: NightCliArgs, until: number | undefined): string {
