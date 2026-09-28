@@ -176,6 +176,12 @@ never means silent allow.
 | ✓ | `history.list` | — | `string[]` |
 | ✓ | `history.append` | `{ text }` | `void` |
 | ✓ | `usage.get` | — | `{ date, tokencount }[]` |
+| ✓ | `night.list` | — | `NightRunSummary[]` — every `freecode night` run, crashed ones reconciled; `needsHuman` counted in core |
+| ✓ | `night.report` | `{ runId? }` | `{ runId, markdown }` — regenerated from the run's logs; newest run when omitted |
+| ✓ | `night.stop` | `{ runId }` | `{ stopped }` — sets `cancelRequested`; `false` unless the run is `running` or `pending` |
+
+The `night.*` methods only read what a separate `freecode night` process left on
+disk; they boot none of the backend, and the daemon never runs a night itself.
 
 ## Stream events
 

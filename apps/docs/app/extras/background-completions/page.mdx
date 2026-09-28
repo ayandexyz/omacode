@@ -50,10 +50,11 @@ Both now exist, so the rule below is live rather than theoretical:
 
 ## How I implemented it (as a recorded invariant)
 
-The risk isn't today; it's the roadmap. FreeCode's `autonomous/` subsystem
-(Phase 0: types, budgets, storage) will eventually grow detached execution,
-and async subagents are a natural future feature. The day either lands, the
-polling anti-pattern becomes possible.
+The risk was the roadmap, and both halves of it have since landed: background
+sub-agents (2026-09-27) and detached execution for
+[overnight runs](/guides/overnight-runs) (2026-09-28). Either one makes the
+polling anti-pattern possible, which is why the invariant below was recorded
+before they were built.
 
 So the spec (`2026-09-04-harness-cost-efficiency.md`, D5) records this as a
 hard constraint on all future work:

@@ -105,6 +105,8 @@ model — commits, rolls back, keeps notes, waits, and decides when the night is
 - **Detached/daemonised execution.** v1 runs in the foreground of a terminal the
   user leaves open (plus sleep inhibition). gnhf ships exactly this and it covers
   "overnight". Detach (old spec §4.4) is Phase 5, only if asked for.
+  *(Superseded: Phase 5 was asked for and built 2026-09-28 — `--detach` / `--at`.
+  Foreground remains the default.)*
 - **Ambient / self-scheduled runs** (old spec Tier B). Still deferred.
 - **Opening PRs, merging, releasing.** The run produces a branch; publishing is
   the user's act (gnhf VISION: "opening PRs belongs to outer automation").
@@ -173,7 +175,7 @@ model — commits, rolls back, keeps notes, waits, and decides when the night is
 | --- | --- | --- |
 | §0 "no OAuth, every turn metered" | OAuth subscription exists (spec 2026-09-05); windows reset | Waiting out a window is now the main overnight blocker |
 | One long session, gate decides "done" | Iterations; model reports done / `--stop-when`; optional `--verify` gates each **commit** | Gate-decides-done had no answer for "what's the next step" |
-| §4.4 detached child as Phase 2 | Foreground + sleep inhibition; detach deferred to Phase 5 | gnhf proves the foreground form covers a night |
+| §4.4 detached child as Phase 2 | Foreground + sleep inhibition by default; detach built in Phase 5 as opt-in `--detach` / `--at` | gnhf proves the foreground form covers a night |
 | §4.8 shell allowlisted to the verify command only | Envelope: broad allow inside the worktree, deny list for irreversible/outward actions | An agent that can only run `pnpm test` can't do real work |
 | Task cards written by the model mid-run | `finish_iteration` result **is** the task card | One structured record per iteration, no second channel |
 | `report.md` generated at end | Kept; plus live `notes.md`, `decisions.jsonl`, `iterations.jsonl` | Report can be regenerated from the logs after a crash |
@@ -841,6 +843,9 @@ an unattended agent loop inside the daemon serving the user's own session,
 sharing its permission surface and competing for the same provider — and
 detached execution is deliberately Phase 5. The empty panel prints the command
 to run instead, which is the whole answer while v1 is a foreground process.
+*(Phase 5 since added `--detach`, which removes the "foreground only" half of
+this reason but not the first half: a detached worker is still a separate
+process, and the daemon still never runs a night. The deviation stands.)*
 
 `night.list` counts `needsHuman` in CORE rather than the frontend: what "needs
 you" means is the run's business, and four clients must not each decide it. In
@@ -874,18 +879,31 @@ retain the envelope. `--commit-style conventional` emits
 a future ISO timestamp and uses the detached worker plus sleep inhibition while it
 waits.
 
+- *Verify:* `sandbox.test.ts` (3: only the run tree is read-write with a private
+  `/tmp`, a workdir outside the tree is refused, credentials are not inherited) +
+  `supervisor.test.ts` (1: the detached worker's pid is persisted and it keeps
+  progressing on its own) + `night.test.ts` (2: `parseStartAt`). **Still open:** a live detached/scheduled night, and a live
+  sandboxed iteration on a real model.
+
+  Found while documenting and fixed the same day: a **bare resume was
+  unbounded**. The limit check skipped a resume, and `runNight` only ever gets
+  `argv`'s limits. The fix is to require a limit on resume too, rather than
+  reload the first leg's: its `--until` has usually passed by the time anyone
+  resumes, so reloading it would stop the resumed leg immediately.
+  `--max-iterations` and `--max-usd` count per leg.
+
 ---
 
 ## 9. Open questions
 
-1. **OS-level sandbox for bash** (bubblewrap/landlock) — worth it before Phase 1
-   ships, or after the first real nights show what the deny list misses?
-2. **Command name.** `freecode night` (bedtime ritual, short) vs
-   `freecode auto` / `freecode autonomous` (matches the directory). Proposal:
-   `night`, with `autonomous/` staying the module name.
+1. ~~**OS-level sandbox for bash**~~ — answered by Phase 5: bubblewrap, on by
+   default on Linux, fail-closed without `bwrap` unless `--no-sandbox`.
+2. ~~**Command name.**~~ — answered: `freecode night`, with `autonomous/` staying
+   the module name.
 3. **Memory extraction during the night.** Off per iteration (cost); should one
    extraction pass over `notes.md` run at the end so the next attended session
    learns from the night?
-4. **Which Anthropic OAuth headers carry the window reset** — Phase 0 answers it.
+4. **Which Anthropic OAuth headers carry the window reset** — still open; needs
+   one real spent-window 429 (Phase 0's remaining item).
 5. **Default `--max-wait`** — 12 h covers two 5-hour windows; is a weekly-limit
    hit better as an immediate abort?

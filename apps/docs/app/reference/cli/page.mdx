@@ -241,6 +241,47 @@ The suite path is resolved relative to the **current working directory**, so thi
 only works from the repo root unless `FREECODE_EVALS_DIR` is set
 ([known gaps](#known-gaps)). See [eval harness](/internals/eval).
 
+## `freecode night`
+
+```bash
+freecode night "<objective>" (--until <07:00|8h> | --max-iterations <n> | --max-usd <n>) [options]
+freecode night                    # on a night/* branch: resume that run
+freecode night status [id]
+freecode night report [id]
+freecode night list
+freecode night stop [id]
+```
+
+Works unattended towards an objective: short fresh-session iterations, each
+successful one committed to `night/<slug>` by the orchestrator, each failed one
+reset. At least one limit is required, and a resume needs its own, since
+`--max-iterations` and `--max-usd` count from the resume point.
+
+| Flag | Alias | Type | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `--until` | — | string | — | deadline: `HH:MM` (past today means tomorrow) or `8h` / `90m` |
+| `--max-iterations` | — | number | — | iteration cap |
+| `--max-usd` | — | number | — | spend cap |
+| `--model` | `-m` | string | config's current model | `provider/model` |
+| `--verify` | — | string | — | command that must exit 0 before each commit |
+| `--stop-when` | — | string | — | finish line in plain words; the model sets `should_stop` |
+| `--max-wait` | — | string | `12h` | total time the run may wait out spent quotas |
+| `--fallback-model` | — | string | — | `provider/model` used on the first spent window instead of waiting |
+| `--worktree` | — | boolean | `false` | run in `<repo>-night-worktrees/<slug>` |
+| `--push` | — | boolean | `false` | push the branch after each commit, never forced |
+| `--detach` | — | boolean | `false` | detached worker; the terminal may close |
+| `--at` | — | string | — | scheduled start (detached): `HH:MM`, duration, or future ISO timestamp |
+| `--sandbox` | — | boolean | `true` | bubblewrap for unattended bash on Linux; `--no-sandbox` opts out |
+| `--commit-style` | — | `night` \| `conventional` | `night` | `night N: …` or `chore(night): …` |
+| `--inhibit` | — | boolean | `true` | hold the machine awake; `--no-inhibit` leaves sleep alone |
+| `--allow` / `--deny` | — | string (repeatable) | — | extra permission rules; cannot widen the envelope's denials |
+
+`id` is a run id or a branch; omitted, the newest run. `stop` sets a flag the
+run reads at its next iteration boundary (and cancels a scheduled run that has
+not started). Run state lives in `~/.freecode/runs/<id>/`. Exit code is `0` if
+the night committed anything, `1` otherwise. Full behaviour — envelope, quota
+waits, sandbox, report — is on [overnight runs](/guides/overnight-runs).
+
 ## `freecode mcp`
 
 ```bash

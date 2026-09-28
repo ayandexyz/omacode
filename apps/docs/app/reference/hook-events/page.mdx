@@ -46,7 +46,7 @@ name that is not in the table below is rejected at load time with a warning.
 | `PostCompact` | after compaction | `"PostCompact"` | `{ success }` | ignored |
 | `SubagentStart` | a sub-agent is spawned | `"SubagentStart"` | `{ name }` | ignored |
 | `SubagentStop` | a sub-agent finishes | `"SubagentStop"` | `{ name }` | ignored |
-| `Notification` | the agent needs attention | `"Notification"` | `{ message }` | ignored — returns `void` |
+| `Notification` | the agent needs attention; also when a [`freecode night`](/guides/overnight-runs) run ends (`night <id> ended: …`) | `"Notification"` | `{ message }` | ignored — returns `void` |
 
 ### What each event does with a successful return
 

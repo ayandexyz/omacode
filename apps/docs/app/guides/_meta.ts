@@ -6,6 +6,7 @@ export default {
   permissions: "Permissions & rules",
   tools: "Tools",
   subagents: "Sub-agents",
+  "overnight-runs": "Overnight runs",
   skills: "Skills",
   "custom-commands": "Custom commands",
   hooks: "Hooks",

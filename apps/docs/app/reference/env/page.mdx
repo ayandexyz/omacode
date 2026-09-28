@@ -137,6 +137,17 @@ See [eval harness](/internals/eval).
 Traces are exported from the recorded event log, never from the hot path, so a
 slow collector cannot slow down a turn.
 
+## Overnight runs
+
+| Variable | Effect |
+| --- | --- |
+| `FREECODE_RUNS_HOME` | where run directories live. Default `~/.freecode/runs` |
+| `FREECODE_NIGHT_WORKER`, `FREECODE_NIGHT_RUN_ID`, `FREECODE_NIGHT_SCHEDULED_FOR` | internal handoff to a `--detach` / `--at` worker. Set by the parent; do not set them yourself |
+
+Inside the Linux sandbox, variables whose names match
+`KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH` are stripped from the
+environment bash sees. See [overnight runs](/guides/overnight-runs).
+
 ## Paths and packaging
 
 | Variable | Set by | Effect |

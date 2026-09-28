@@ -1,0 +1,260 @@
+---
+title: "Overnight runs"
+description: "freecode night — leave an objective running unattended and review one commit per step in the morning."
+---
+
+# Overnight runs
+
+`freecode night "<objective>"` works towards an objective with nobody watching.
+It runs a series of short **iterations**. Each one is a fresh session that does
+one small, verifiable step and ends by calling the `finish_iteration` tool. The
+**orchestrator**, not the model, then commits each successful step to its own
+branch, `night/<slug>`. A failed step is thrown away with `git reset --hard`. In
+the morning you get a report and a branch to review.
+
+Nothing in a night ever waits for a human. Questions answer themselves and are
+recorded, permission prompts are answered by a fixed **envelope**, and a spent
+subscription window is waited out. Your `main` branch is never touched, and
+nothing is pushed unless you pass `--push`.
+
+## Quick start
+
+```bash
+# From a clean git checkout, on a branch:
+freecode night "reduce the TUI's render cost" --until 07:00
+
+# Next morning:
+freecode night report
+git log --oneline night/reduce-the-tuis-render-cost
+```
+
+A limit is **required**: at least one of `--until`, `--max-iterations` or
+`--max-usd`. An unbounded night has to be something you chose, not a default.
+
+## Before it starts
+
+Preflight refuses to start rather than start something it cannot protect:
+
+- **Not a git repository.** Without a repo there is nothing to commit to and nothing to roll back.
+- **Detached HEAD.** Check out a branch first.
+- **Dirty working tree.** A failed step resets the tree, which would discard your uncommitted work. `--worktree` skips this check because it runs somewhere else.
+- **No limit.** See above.
+- **`--sandbox` on Linux without a working `bwrap`.** Install bubblewrap, or pass `--no-sandbox`.
+
+The run then switches to a new `night/<slug>` branch. If that name is taken, it
+uses the next free one (`-1`, `-2`, …), so a second night on the same objective
+never lands on the first night's commits.
+
+## How one iteration works
+
+1. A fresh session gets the objective, the run's notes so far, and instructions:
+   pick the smallest verifiable step, validate it, and don't commit.
+2. The model works in `build` mode, limited to **60 turns** and **30 minutes**.
+3. It ends by calling `finish_iteration` with `success`, a one-line `summary`
+   (which becomes the commit subject), and optionally `key_changes`,
+   `key_learnings`, `decisions`, `needs_human` and `should_stop`.
+4. The orchestrator decides what happens next:
+
+| Outcome | What happens to the tree |
+| --- | --- |
+| `success: true` with a diff | `--verify` runs if you set it, then the orchestrator commits `night <n>: <summary>` |
+| `success: true`, no diff, only learnings | the learnings go into the notes and nothing is committed |
+| `success: true`, no diff, no learnings | counted as `no_op` and reset |
+| `success: false`, or `--verify` failed | reset. The learnings (and the verify output) go into the notes |
+| the model stopped without calling `finish_iteration` | it is asked once more. If it still doesn't call it, the iteration is `no_finish` and is reset |
+| the commit itself failed (e.g. a pre-commit hook) | the work is **kept**, and the next iteration is told to repair it first. A second commit failure in a row discards it |
+
+After **3 consecutive failed iterations** the run aborts. Waiting out a quota
+does not count as a failure.
+
+`notes.md` is how iterations talk to each other. It grows by one section per
+iteration and lives outside the repository, so it can never end up in a commit.
+When it gets long, the prompt keeps the first section and the most recent ones.
+
+## Flags
+
+```bash
+freecode night "<objective>" [limits] [options]
+freecode night                      # on a night/* branch: resume that run
+freecode night status|report|list|stop [id]
+```
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--until` | — | wall-clock deadline: `07:00` (a time already past today means tomorrow) or a duration such as `8h` / `90m`. Checked **between** iterations, so a step that starts before the deadline may finish after it |
+| `--max-iterations` | — | stop after this many iterations |
+| `--max-usd` | — | stop once the run has cost this much |
+| `--model`, `-m` | the configured model | `provider/model` |
+| `--verify` | — | a command that must exit 0 before each commit, e.g. `'pnpm test'`. Its output tail goes into the notes |
+| `--stop-when` | — | your finish line, in plain words. The model sets `should_stop` when it is met |
+| `--max-wait` | `12h` | total time the whole run may spend waiting out spent quotas |
+| `--fallback-model` | — | `provider/model` to switch to the **first** time a usage window is spent, instead of waiting. Opt-in, because a night of commits from a model you didn't pick would be a surprise |
+| `--worktree` | off | run in `<repo>-night-worktrees/<slug>` so you keep using your checkout |
+| `--push` | off | the orchestrator pushes the branch after each commit, never forced. A failed push is reported once and doesn't stop the night |
+| `--detach` | off | run in a background worker, so the terminal may close. See [Detached and scheduled runs](#detached-and-scheduled-runs) |
+| `--at` | — | start later, in a background worker: `23:30`, `90m`, or a future ISO timestamp |
+| `--sandbox` | **on** | run bash, `--verify` and background shells inside bubblewrap on Linux. `--no-sandbox` turns it off |
+| `--commit-style` | `night` | `night` gives `night <n>: …`. `conventional` gives `chore(night): …` |
+| `--inhibit` | on | keep the machine awake. `--no-inhibit` leaves sleep alone |
+| `--allow`, `--deny` | — | extra permission rules for this run (repeatable). A `--allow` cannot override the envelope's own denials |
+
+## Stopping a run
+
+- **Ctrl+C once:** finish the current iteration, then stop.
+- **Ctrl+C twice**, or `SIGTERM`: stop now. Uncommitted changes are **left in
+  the tree on purpose**, because a forced stop must never destroy work. The
+  report lists them.
+- **`freecode night stop [id]`** from another terminal, or `k` in the TUI's
+  `/night` panel: sets a flag that the run reads at its next iteration boundary.
+  This also cancels a scheduled run that hasn't started yet.
+
+The process exits `0` if the night committed anything, otherwise `1`.
+
+## Nobody to ask: questions, decisions and the envelope
+
+**Questions.** If the model calls `question`, the call answers itself, telling
+the model to decide and record its choice. The ask is logged. Real blockers
+(credentials, a product call, anything irreversible) should go into
+`finish_iteration.needs_human`. They appear first in the morning report.
+
+**Permissions.** The envelope replaces the prompt. It has three parts:
+
+- **Deny rules** are added to the session's deny tier, so even your own allow
+  rules can't widen them:
+  - git: `git push / commit / reset / checkout / switch / rebase / merge / branch / worktree / tag / config`
+  - GitHub CLI and publishing: `gh`, `npm|pnpm|yarn|cargo publish`, `docker push`
+  - system changes: `sudo`, global installs, `rm -rf /`, `rm -rf ~`
+
+  A denied verb is refused however it is spelled: chained with `&&` / `;` / `|`,
+  behind an absolute path (`/usr/bin/git`), or after environment assignments.
+- **Writes stay inside the run's tree.** Symlinks are resolved before the check.
+  Writes under `.git/` are refused.
+- **Everything else the mode would have asked about is allowed.**
+
+Every refusal is recorded and returned to the model as final ("do not retry
+it"). The envelope is a **guard rail, not a sandbox**: `eval "$(…)"`, an alias or
+a wrapper script can still get past it. What limits the damage is the rest of
+the design: every failed step is reset, the run has its own branch, and nothing
+is pushed.
+
+**The OS sandbox** (Linux, on by default) closes the filesystem gap:
+
+- the host `/` is read-only, and your home directory is hidden
+- `/tmp` is private
+- environment variables whose names look like credentials (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `AUTH`, …) are stripped
+- the run's tree is the only writable mount
+- PID, IPC and UTS namespaces are isolated
+
+The network is still shared, so installing packages still works, and pushing or
+publishing is still stopped by the envelope. On macOS and Windows the sandbox is
+unavailable. The run warns and continues with the envelope alone.
+
+## Waiting out a quota
+
+If a provider says the usage window is spent, the run resets the tree, sleeps,
+and retries **the same iteration number**. Nothing happened, so it isn't a
+failure.
+
+| The provider said | The run |
+| --- | --- |
+| a reset time | sleeps until it, plus 60 seconds of grace |
+| a window, but no reset time | probes after 1, 2, 4, 8, 16, then every 30 minutes |
+| something it can't classify | probes 3 times, then treats it as permanent |
+| out of credit, or an auth failure | aborts at once, because waiting can't fix it |
+
+A single wait is capped at 24 hours. The run won't start a wait that would go
+over `--max-wait` or past `--until`; it stops instead. While asleep it re-checks
+the clock every minute, so a suspended laptop or a Ctrl+C is noticed promptly.
+
+**Keeping the machine awake:** the run holds `systemd-inhibit` on Linux or
+`caffeinate` on macOS. That stops idle sleep, but **closing the lid still
+suspends most laptops**. If neither tool exists, the run prints a warning and
+carries on.
+
+## Detached and scheduled runs
+
+```bash
+freecode night "migrate the tests to vitest" --max-iterations 20 --detach
+freecode night "triage the TODO list" --until 06:00 --at 23:30
+```
+
+The command prints the run id, its PID and a log path
+(`~/.freecode/runs/<id>/worker.log`), then exits. The worker is the same CLI,
+started again in the background:
+
+- It **always** uses a dedicated worktree, even without `--worktree`, so it
+  never switches the branch in the checkout you are using.
+- A scheduled worker holds the machine awake while it waits for its start time.
+- Until the worker starts, the run shows as `pending`. A pending or running
+  worker whose PID has gone is reported as `crashed`.
+
+## The morning
+
+```bash
+freecode night list               # every run, newest first
+freecode night status [id]        # how it's going, or how it ended
+freecode night report [id]        # the morning report
+```
+
+`id` can be a run id or a branch name. With no id, the newest run is used. The
+report is regenerated from the run's logs, so a run that crashed still has one.
+Its sections are always in this order:
+
+1. **Needs you**: always shown, even when empty, so an empty section can't be
+   confused with one a bug dropped.
+2. **Decisions made for you**: irreversible ones first. An ask with no recorded
+   answer shows as "answer not recorded".
+3. **Refused actions** and **Waits**.
+4. **Iterations**, **Changes** (diffstat) and **Review**. The Review section
+   ends with the command to throw the whole night away (`git branch -D …`).
+5. **Uncommitted**: paths left in the tree by a hard stop.
+
+A model with no pricing shows "cost unknown", never `$0`. When the run ends it
+also fires your [Notification hook](/reference/hook-events), e.g. `night 7f3c
+ended: max_iterations — 6 commits on night/…, 1 thing(s) need you`, so a desktop
+or phone notification can tell you.
+
+**Resuming:** run `freecode night` with no objective while on a `night/*`
+branch. It continues that run's numbering, commits and wait total, so the report
+covers the whole night. A resume needs a limit of its own, just like a new run.
+The first leg's limits are not reloaded, because its `--until` has usually passed
+by then. `--max-iterations` and `--max-usd` count from the resume point, not
+from the start of the night:
+
+```bash
+git switch night/reduce-the-tuis-render-cost
+freecode night --max-iterations 5
+```
+
+In the TUI, `/night` lists runs. **Enter** opens the report in the transcript,
+and **k** stops a running night. The panel can't *start* a night: an unattended
+loop inside the daemon serving your own session would share its permission
+surface. Use the CLI.
+
+## Where things live
+
+Everything a run writes about itself is in `~/.freecode/runs/<id>/`
+(`FREECODE_RUNS_HOME` moves it), outside the repository:
+
+| File | Contents |
+| --- | --- |
+| `manifest.json` | status, limits, branch, iteration and commit lists, cost. Written atomically |
+| `notes.md` | the notes iterations pass to each other |
+| `iterations.jsonl` | one record per iteration or wait |
+| `decisions.jsonl` | asks, decisions, refusals, needs-you items |
+| `report.md` | the morning report |
+| `worker.log` | detached runs only |
+
+Before any line is written, values that look like credentials are replaced with
+`[redacted: looked like a credential]`. The line is kept, so you are still told
+something needs you.
+
+## Known gaps
+
+- **The envelope can be talked around.** `eval`, aliases and wrapper scripts
+  defeat its prefix matching (see above). On Linux the sandbox covers the
+  filesystem side; elsewhere nothing does.
+- **Unmeasured:** no real spent-window 429 has been captured on the Anthropic
+  OAuth path yet, so which header carries the reset is unconfirmed. Until then
+  such a window is probed rather than slept to a known time. A full real night
+  on this repository is also still to be run.
