@@ -23,6 +23,7 @@ import type {
   LoopAction,
   LoopHeuristics,
   UserInput,
+  LoopFailure,
   LoopResult,
   AssistantContent,
   HookContext,
@@ -186,6 +187,8 @@ import {
   RecoveryManagerTag,
 } from "../effect/context.js";
 import {
+  classifyLoopFailure,
+  rateLimitHeaders,
   createRecoveryManagerFromConfig,
   isContextOverflowError,
   type RecoveryManager,
@@ -423,6 +426,8 @@ export class AgentLoop {
   // this available, so the run can hand back real content instead of a bare
   // status string.
   private lastResponseText: string | undefined;
+  /** The error object behind the last failed turn (see executeTurn's catch). */
+  private lastTurnError: unknown;
   private compiler: PromptCompiler;
   // Per-rule permission layer: project + user settings + session grants
   private permissionSettings: PermissionSettingsManager | undefined;
@@ -964,6 +969,7 @@ export class AgentLoop {
             this.lastResponseText ? this.lastResponseText + note : undefined,
             undefined,
             usageSoFar(),
+            { kind: "turn_cap" },
           );
         }
 
@@ -985,6 +991,7 @@ export class AgentLoop {
             undefined,
             undefined,
             usageSoFar(),
+            { kind: "stuck", reason: healthAction.reason },
           );
         }
         if (healthAction.action === "warn") {
@@ -1087,9 +1094,14 @@ export class AgentLoop {
               undefined,
               undefined,
               usageSoFar(),
+              { kind: "interrupted" },
             );
           }
-          return await this.fail("Turn execution failed", turnResult.error);
+          return await this.fail(
+            "Turn execution failed",
+            turnResult.error,
+            classifyLoopFailure(this.lastTurnError ?? turnResult.error),
+          );
         }
 
         // Advance reminder counters based on what this turn did.
@@ -1337,7 +1349,7 @@ export class AgentLoop {
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return await this.fail("Loop error", message);
+      return await this.fail("Loop error", message, classifyLoopFailure(error));
     }
   }
 
@@ -2237,6 +2249,9 @@ export class AgentLoop {
         usage: providerResult.usage,
       };
     } catch (error) {
+      // Kept as the object, not the string: classifyLoopFailure needs the
+      // status code and the QuotaExhaustedError instance, which String() eats.
+      this.lastTurnError = error;
       return { success: false, toolResults: [], error: String(error) };
     }
   }
@@ -2434,6 +2449,10 @@ export class AgentLoop {
             ? "abort"
             : "provider",
         error: err instanceof Error ? err.message : String(err),
+        // Names + values of the limit-describing headers only. This is how we
+        // learn which headers a spent subscription window actually sends
+        // (overnight-runs spec §4.7, Phase 0).
+        rateLimitHeaders: rateLimitHeaders(err),
       });
     };
 
@@ -3692,7 +3711,11 @@ export class AgentLoop {
     BusEvents.sessionUpdated(this.state.sessionId);
   }
 
-  private async fail(message: string, error?: string): Promise<LoopResult> {
+  private async fail(
+    message: string,
+    error?: string,
+    failure: LoopFailure = { kind: "provider", message: error ?? message },
+  ): Promise<LoopResult> {
     this.cacheWarmer()?.onRunSettled();
     // Emit session.error event
     BusEvents.sessionError(this.state.sessionId, error || message);
@@ -3702,6 +3725,7 @@ export class AgentLoop {
     });
     return {
       success: false,
+      failure,
       message: error || message,
       turnCount: this.state.turnCount,
       iterationCount: this.state.iterationCount,
@@ -3719,6 +3743,12 @@ export class AgentLoop {
       cacheReadInputTokens?: number;
       contextTokens?: number;
     },
+    /**
+     * Set on the exits that report success because they hand back the model's
+     * last words, but did not finish the work: turn cap, loop-health stop,
+     * interrupt. Attended callers ignore it; an unattended one rolls back.
+     */
+    failure?: LoopFailure,
   ): Promise<LoopResult> {
     this.cacheWarmer()?.onRunSettled();
     // Emit session.updated event
@@ -3729,6 +3759,7 @@ export class AgentLoop {
     });
     return {
       success: true,
+      failure,
       message,
       content,
       thinking: thinking ?? this.lastThinking,

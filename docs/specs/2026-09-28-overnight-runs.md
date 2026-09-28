@@ -681,15 +681,32 @@ needs a model:
 
 Each phase is shippable and revertible on `autonomous`.
 
-**Phase 0 — Measure, and stop throwing the evidence away.** Small.
+**Phase 0 — Measure, and stop throwing the evidence away.** Small. **Built
+2026-09-28**, except the one item that needs a real spent window (below).
 - `QuotaExhaustedError` with `resetAt`/`scope`; record rate-limit headers
   (names + values, no body) on `model.error` rollout events.
 - `LoopResult.failure` typed field, filled at the existing exit points.
 - Headless `question` must not wait 30 min: with no frontend subscribed, reject
   immediately (fixes `freecode run` today, independent of night runs; file in
   TODO.md if split out).
-- *Verify:* unit tests; one real spent-window 429 captured on the OAuth path and
-  its headers written into §4.7 of this spec.
+- *Verify:* unit tests (`agent/recovery/quota-classify.test.ts`, plus the
+  headless-`question` case in `server.test.ts`). **Still open:** one real
+  spent-window 429 captured on the OAuth path and its headers written into §4.7
+  — `quotaResetAt` reads every usual spelling (`retry-after`, `retry-after-ms`,
+  any `*-reset`, epoch seconds or ISO) and takes the soonest future one, so the
+  first real 429 tells us which it was via `model.error.rateLimitHeaders`.
+  Until then an OAuth window with no reset header classifies `unknown` and the
+  orchestrator probes rather than sleeping blind.
+
+  As built: `QuotaExhaustedError` (+ `classifyQuotaScope`, `quotaResetAt`,
+  `rateLimitHeaders`, `classifyLoopFailure`) in `agent/recovery/manager.ts`;
+  `LoopFailure` on `LoopResult` in `agent/types.ts`, filled at all five exits —
+  including the three that report `success: true` while handing back the
+  model's last words (turn cap, loop-health stop, interrupt);
+  `ModelErrorEvent.rateLimitHeaders`; `askQuestion` rejecting at once with no
+  subscriber. Note a MiniMax "Token Plan usage limit reached: Upgrade … or
+  purchase Credits" classifies **`credits`**, not `window` — waiting cannot
+  fix it.
 
 **Phase 1 — Foreground iteration loop with the leash.** The core.
 - `orchestrator`, `iteration`, `prompt`, `git`, `notes`, `finish_iteration`,

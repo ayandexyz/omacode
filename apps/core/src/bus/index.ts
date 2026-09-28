@@ -321,6 +321,17 @@ export async function askQuestion(
   sessionId?: string,
 ): Promise<string[]> {
   return new Promise((resolve, reject) => {
+    // Headless: nobody is listening, so nobody could ever answer. Waiting the
+    // full PROMPT_TIMEOUT_MS here hangs an unattended run for 30 minutes to
+    // reach the same rejection — mirrors askPermission below.
+    if (
+      bus.listenerCount("question.asked") === 0 &&
+      bus.listenerCount("*") === 0
+    ) {
+      reject(new Error("No frontend connected to answer question"));
+      return;
+    }
+
     // Store the pending question
     pendingQuestions.set(requestId, { resolve, reject });
 
