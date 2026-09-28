@@ -140,9 +140,14 @@ is pushed.
 **The OS sandbox** (Linux, on by default) closes the filesystem gap:
 
 - the host `/` is read-only, and your home directory is hidden
+- toolchain roots selected by home-based `$PATH` entries are mounted back
+  **read-only**; credential and configuration roots remain hidden
 - `/tmp` is private
 - environment variables whose names look like credentials (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `AUTH`, …) are stripped
 - the run's tree is the only writable mount
+- in a worktree run, the main repository's `.git` is mounted **read-only**:
+  `git status`, `git diff` and `git log` work, while `git commit` fails on the
+  read-only filesystem (as well as being refused by the envelope)
 - PID, IPC and UTS namespaces are isolated
 
 The network is still shared, so installing packages still works, and pushing or
@@ -256,5 +261,6 @@ something needs you.
   filesystem side; elsewhere nothing does.
 - **Unmeasured:** no real spent-window 429 has been captured on the Anthropic
   OAuth path yet, so which header carries the reset is unconfirmed. Until then
-  such a window is probed rather than slept to a known time. A full real night
-  on this repository is also still to be run.
+  such a window is probed rather than slept to a known time. Only short live
+  runs have been done so far (3 iterations detached, 2026-09-28), not a full
+  night.

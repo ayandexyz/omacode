@@ -174,7 +174,7 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
   const { DEFAULT_RUN_LIMITS, EMPTY_USAGE } = await import(
     "../../autonomous/types.js"
   );
-  const { findNightRun, buildReport } = await import(
+  const { findNightRun, regenerateReport } = await import(
     "../../autonomous/night-ops.js"
   );
   const { initProviders } = await import("../../providers/index.js");
@@ -335,14 +335,22 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
     }
     projectPath = worktreeDir;
     git = createGitOps(projectPath);
+    // The agent loop hands every tool `cwd: process.cwd()`, so without this
+    // bash and every relative read/edit/write resolved against the USER'S
+    // checkout while the envelope and git worked on the worktree. The first
+    // live detached night found it: the sandbox refused every bash call
+    // ("workdir … is outside the run tree") until the turn cap; with
+    // --no-sandbox the commands would have run in the user's checkout.
+    process.chdir(projectPath);
     console.log(`worktree: ${worktreeDir}`);
   } else {
     await git.createOrSwitchBranch(branch);
   }
 
   // Where the branch started, for the report's diffstat. Captured before the
-  // run adds to it.
-  const baseCommit = (await git.headHash()) ?? "HEAD";
+  // run adds to it, and persisted so a resumed leg still reports the whole night.
+  const baseCommit =
+    resuming?.night?.baseCommit ?? (await git.headHash()) ?? "HEAD";
 
   const runId =
     resuming?.runId ??
@@ -355,6 +363,7 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
   const night = {
     objective,
     branch,
+    baseCommit,
     stopWhen,
     verifyCommand,
     fallbackModel,
@@ -585,12 +594,7 @@ export async function runNightCli(argv: NightCliArgs): Promise<void> {
 
   // The morning report, written where `freecode night report` will regenerate
   // it from the same logs if this process never got the chance.
-  if (finished?.night) {
-    buildReport(finished, {
-      diffstat: await git.diffstatAgainst(baseCommit),
-      subjects: await git.subjectsSince(baseCommit),
-    });
-  }
+  if (finished?.night) await regenerateReport(finished);
 
   const decisions = store.readDecisions(runId);
   const needsHumanCount = decisions.filter((d) => d.kind === "needs_human").length;

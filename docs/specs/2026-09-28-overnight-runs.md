@@ -868,8 +868,10 @@ worktree so the worker never changes the user's active checkout. A provisional
 logic as a running night. `night stop` also cancels a pending scheduled run.
 
 The bash sandbox is Linux bubblewrap: host `/` is read-only, the user's home is hidden,
-credential-shaped environment variables are stripped, the run worktree is the only
-read-write bind, `/tmp` is private, and process/IPC/UTS namespaces are isolated.
+home-based toolchain roots selected by `PATH` are mounted back read-only (credential
+and configuration roots stay hidden), credential-shaped environment variables are
+stripped, the run worktree is the only read-write bind, `/tmp` is private, and
+process/IPC/UTS namespaces are isolated.
 Network remains shared so package installation and user-approved web work keep their
 existing semantics; the permission envelope still refuses publishing/pushing. The same
 sandbox wraps `--verify` and background shells. Linux fails closed when `bwrap` is
@@ -882,8 +884,9 @@ waits.
 - *Verify:* `sandbox.test.ts` (3: only the run tree is read-write with a private
   `/tmp`, a workdir outside the tree is refused, credentials are not inherited) +
   `supervisor.test.ts` (1: the detached worker's pid is persisted and it keeps
-  progressing on its own) + `night.test.ts` (2: `parseStartAt`). **Still open:** a live detached/scheduled night, and a live
-  sandboxed iteration on a real model.
+  progressing on its own) + `night.test.ts` (2: `parseStartAt`). Live detached + sandboxed iterations
+  done (below). **Still open:** a live *scheduled* (`--at`) start, and a full
+  night.
 
   Found while documenting and fixed the same day: a **bare resume was
   unbounded**. The limit check skipped a resume, and `runNight` only ever gets
@@ -891,6 +894,31 @@ waits.
   reload the first leg's: its `--until` has usually passed by the time anyone
   resumes, so reloading it would stop the resumed leg immediately.
   `--max-iterations` and `--max-usd` count per leg.
+
+  **First live runs (2026-09-28, MiniMax-M3, detached + sandbox).** Run
+  `74b18cb1` made 3 iterations and 2 commits (both correct, comment-only), cost
+  $0.58 in 11 min, and found five bugs, all fixed the same day:
+  (1) **tools ran in the user's checkout.** The loop passes
+  `cwd: process.cwd()`, and a worktree run never changed directory, so the
+  sandbox refused every bash call and iteration 1 died at the turn cap. With
+  `--no-sandbox` those commands would have run in the user's checkout. Fixed
+  with `process.chdir` into the worktree.
+  (2) A failed iteration's record dropped its session id, turns and cost.
+  (3) **An honest `success:false` lost its `key_learnings`** because the
+  finish was never passed to `resetAndNote`. That is the one thing the finish
+  tool promises a failed attempt.
+  (4) The report's review range was hard-coded to `main`, and `night report`
+  regenerated `report.md` without the diffstat. `baseCommit` is now persisted,
+  and every regeneration goes through `regenerateReport`.
+  (5) MiniMax's nested tool arguments arrive garbled: lists nested one level
+  deeper, a stray `</item>`, and `why` swallowing `<reversible>`. The garbling
+  flipped a reversible decision to irreversible. `finish_iteration` now
+  untangles them.
+  The verification run `b401724e` then found a sixth: inside the sandbox, git
+  failed in a worktree, because its metadata lives under the hidden `$HOME`.
+  The main `.git` is now mounted read-only. The documentation pass then found
+  that home-only toolchains were hidden too; home-based `PATH` toolchain roots
+  are now selectively mounted read-only while credential/config roots remain hidden.
 
 ---
 

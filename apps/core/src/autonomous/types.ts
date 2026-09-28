@@ -169,6 +169,12 @@ export interface RunManifest {
 export interface NightManifestFields {
   objective: string;
   branch: string;
+  /**
+   * The commit the branch started from. The report's review range and
+   * diffstat are measured from it, never from `main`: a night may branch off
+   * anything, and a resumed leg must still report the whole night.
+   */
+  baseCommit?: string;
   stopWhen?: string;
   verifyCommand?: string;
   /** Iterations attempted so far (a retried wait does not increment it). */

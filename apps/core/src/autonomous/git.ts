@@ -37,9 +37,9 @@ export interface GitOps {
   /** Push the run's branch. Never forced, never to another branch. */
   push(branch: string): Promise<{ ok: boolean; error?: string }>;
   /** `--stat` against the branch point, for the morning report. */
-  diffstatAgainst(base: string): Promise<string>;
+  diffstatAgainst(base: string, head?: string): Promise<string>;
   /** Commit subjects on the run's branch, keyed by full hash. */
-  subjectsSince(base: string): Promise<Record<string, string>>;
+  subjectsSince(base: string, head?: string): Promise<Record<string, string>>;
   /** Create a worktree for the branch and return its path. */
   addWorktree(dir: string, branch: string): Promise<void>;
 }
@@ -152,22 +152,22 @@ export function createGitOps(cwd: string): GitOps {
       }
     },
 
-    async diffstatAgainst(base) {
+    async diffstatAgainst(base, head = "HEAD") {
       try {
         // Three dots: what the branch added, not what `base` moved on to.
-        const { stdout } = await git(cwd, ["diff", "--stat", `${base}...HEAD`]);
+        const { stdout } = await git(cwd, ["diff", "--stat", `${base}...${head}`]);
         return stdout;
       } catch {
         return "";
       }
     },
 
-    async subjectsSince(base) {
+    async subjectsSince(base, head = "HEAD") {
       try {
         const { stdout } = await git(cwd, [
           "log",
           "--format=%H%x00%s",
-          `${base}..HEAD`,
+          `${base}..${head}`,
         ]);
         const out: Record<string, string> = {};
         for (const line of stdout.split("\n")) {

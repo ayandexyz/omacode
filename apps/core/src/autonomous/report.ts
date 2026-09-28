@@ -137,8 +137,10 @@ export function renderReport(input: ReportInput): string {
 
   out.push("## Review");
   out.push("```sh");
-  out.push(`git log --oneline main..${night.branch}`);
-  out.push(`git diff main...${night.branch} --stat`);
+  // Old manifests predate `baseCommit`; `main` was the only guess they had.
+  const base = night.baseCommit?.slice(0, 12) ?? "main";
+  out.push(`git log --oneline ${base}..${night.branch}`);
+  out.push(`git diff ${base}...${night.branch} --stat`);
   const traceable = iterations.find((i) => i.sessionId);
   if (traceable) {
     out.push(`freecode trace ${traceable.sessionId}   # any iteration's trace`);

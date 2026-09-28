@@ -287,7 +287,9 @@ export async function runNight(
     const finish = outcome.finish;
     if (!finish || outcome.failure) {
       const reason = outcome.failure ?? "no_finish";
-      await resetAndNote(reason);
+      // `finish` too: an honest success:false carries the learnings the next
+      // iteration is promised (finish_iteration's own description).
+      await resetAndNote(base, reason, finish);
       if (consecutiveFailures >= limits.maxConsecutiveFailures) {
         stopReason = "consecutive_failures";
         break;
@@ -301,7 +303,7 @@ export async function runNight(
     const dirty = await deps.git.dirtyPaths();
     if (dirty.length === 0) {
       if (finish.keyLearnings.length === 0) {
-        await resetAndNote("no_op", finish);
+        await resetAndNote(base, "no_op", finish);
         if (consecutiveFailures >= limits.maxConsecutiveFailures) {
           stopReason = "consecutive_failures";
           break;
@@ -407,18 +409,16 @@ export async function runNight(
   };
 
   async function resetAndNote(
+    base: Omit<IterationRecord, "failure" | "summary">,
     reason: IterationFailureReason,
     finish?: FinishIterationResult,
   ): Promise<void> {
     await deps.git.reset();
     consecutiveFailures += 1;
+    // `base` keeps the session id, turns and cost: a failed iteration is the
+    // one most worth tracing, and its spend is real.
     deps.record({
-      kind: "iteration",
-      n: iteration,
-      sessionId: "",
-      startedAt: deps.now(),
-      endedAt: deps.now(),
-      turns: 0,
+      ...base,
       failure: reason,
       summary: finish?.summary,
     });

@@ -40,13 +40,13 @@ export const nightOps = {
   },
 
   async report(id?: string): Promise<void> {
-    const { findNightRun, buildReport } = await import(
+    const { findNightRun, regenerateReport } = await import(
       "../../autonomous/night-ops.js"
     );
     const run = findNightRun(id);
     if (!run?.night) return notFound(id);
     // Regenerated from the logs every time, so a crashed run gets one too.
-    process.stdout.write(buildReport(run));
+    process.stdout.write(await regenerateReport(run));
   },
 
   async list(): Promise<void> {

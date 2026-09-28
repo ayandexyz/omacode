@@ -10,13 +10,9 @@ Declared in `packages/shared/src/ipc/protocol.ts`; handled in
 sharing one pipe, why streaming is out of band — read
 [the IPC protocol](/internals/ipc). This page is the listing.
 
-**49 methods are implemented. 24 of them are declared in `METHODS`.** The ✓ column
-below marks the declared ones: those are the calls a TypeScript frontend gets
-compile-time checking for. The rest work identically at runtime and are unchecked
-at compile time ([known gaps](#known-gaps)).
-
-Every handler reads its params with an unchecked cast, so a missing field arrives
-as `undefined` rather than as an "invalid params" error.
+**All 71 implemented methods are declared in `METHODS`.** The ✓ column marks that
+shared compile-time contract. Required fields also have a runtime contract in
+`REQUIRED_PARAMS`; the server checks it before dispatch.
 
 ## Errors
 
@@ -28,8 +24,10 @@ as `undefined` rather than as an "invalid params" error.
 | `-32002` | `REQUEST_ALREADY_RESOLVED` — a prompt was answered by someone else first |
 | `-32001` | unauthorized (web transport) |
 
-`-32602` (invalid params) is never emitted. A line that fails to parse on stdin is
-logged to stderr and dropped — it has no `id` to answer.
+`-32602` names the missing or mistyped required field. Validation is deliberately
+narrow: optional and unknown fields remain the handler's responsibility for
+forward compatibility. A line that fails to parse on stdin is logged to stderr
+and dropped — it has no `id` to answer.
 
 ## Tools
 
@@ -51,12 +49,12 @@ permission engine, with `cwd = process.cwd()`.
 | ✓ | `session.dequeue` | `{ sessionId, id }` | `{ removed: boolean }` |
 | ✓ | `session.compact` | `{ sessionId }` | `{ compacted, tokensBefore, tokensAfter, reason? }` |
 | ✓ | `session.list` | `{ projectPath?, status? }` | `SessionMeta[]` |
-| ✓ | `session.resume` | `{ sessionId }` | `{ sessionId, messages }` |
-|  | `session.switch` | `{ sessionId }` | `void` |
-|  | `session.fork` | `{ sessionId }` | `string` — the new session id |
-|  | `session.archive` | `{ sessionId }` | `void` |
-|  | `session.delete` | `{ sessionId }` | `void` |
-|  | `session.getInterrupted` | — | `{ sessionId, messageId } \| null` |
+| ✓ | `session.resume` | `{ sessionId, agentMode? }` | `{ sessionId, messages }` |
+| ✓ | `session.switch` | `{ sessionId }` | `void` |
+| ✓ | `session.fork` | `{ sessionId }` | `string` — the new session id |
+| ✓ | `session.archive` | `{ sessionId }` | `void` |
+| ✓ | `session.delete` | `{ sessionId, purge? }` | `void` |
+| ✓ | `session.getInterrupted` | — | `{ sessionId, messageId } \| null` |
 
 Notes that bite people:
 
@@ -77,14 +75,29 @@ Notes that bite people:
   the declared `SessionMeta[]` is the honest shape. Use `session.resume` to get
   messages.
 
+## Session tree and rewind
+
+| ✓ | Method | Params | Result |
+| --- | --- | --- | --- |
+| ✓ | `session.tree` | `{ sessionId }` | tree entries with previews, labels and active-path markers |
+| ✓ | `session.navigate` | `{ sessionId, entryId, summarize? }` | `{ messages, abandoned, summarized }` |
+| ✓ | `session.label` | `{ sessionId, entryId, label }` | `void` |
+| ✓ | `session.checkpoints` | `{ sessionId }` | checkpoint summaries keyed by tree entry id |
+| ✓ | `session.rewindPreview` | `{ sessionId, entryId }` | paths and statuses a rewind would restore |
+| ✓ | `session.rewind` | `{ sessionId, entryId, files?, conversation?, summarize? }` | restored/skipped paths plus the active messages |
+
+Navigation changes the conversation leaf only. Rewind can restore the associated
+shadow-git snapshot first; the optional flags let a caller request either half.
+Both refuse to race a running turn.
+
 ## Session transfer
 
 | ✓ | Method | Params | Result |
 | --- | --- | --- | --- |
-|  | `session.export` | `{ sessionId }` | `ExportedSession` |
-|  | `session.import` | `{ url }` | `{ sessionId }` |
-|  | `session.upload` | `{ sessionId, endpoint, apiKey? }` | `string` — the remote URL |
-|  | `session.download` | `{ url, endpoint?, apiKey? }` | `string` |
+| ✓ | `session.export` | `{ sessionId }` | `ExportedSession` |
+| ✓ | `session.import` | `{ url }` | `{ sessionId }` |
+| ✓ | `session.upload` | `{ sessionId, endpoint, apiKey? }` | `string` — the remote URL |
+| ✓ | `session.download` | `{ url, endpoint?, apiKey? }` | `string` |
 
 ## Claude Code import
 
@@ -99,9 +112,9 @@ Read-only: core never writes to `$CLAUDE_CONFIG_DIR`.
 
 | ✓ | Method | Params | Result |
 | --- | --- | --- | --- |
-| ✓ | `providers.list` | — | `{ id, name, description, hasApiKey }[]` |
-|  | `models.list` | `{ providerId }` | provider model list |
-|  | `models.contextLimit` | `{ provider, model }` | `number` |
+| ✓ | `providers.list` | `{ kind?: "api" \| "web" }` | `{ id, name, description, hasApiKey }[]` |
+| ✓ | `models.list` | `{ providerId }` | provider model list |
+| ✓ | `models.contextLimit` | `{ provider, model }` | `number` |
 
 `hasApiKey` is the whole reason `providers.list` is shaped this way — the key
 itself never crosses the pipe.
@@ -110,10 +123,13 @@ itself never crosses the pipe.
 
 | ✓ | Method | Params | Result |
 | --- | --- | --- | --- |
-|  | `config.get` | — | `~/.freecode/config.json`, **redacted** |
-|  | `config.setApiKey` | `{ provider, apiKey, model? }` | `void` |
-|  | `config.getCurrentModel` / `config.setCurrentModel` | — / `{ provider, model }` | current pair / `void` |
-|  | `config.getLastAgentMode` / `config.setLastAgentMode` | — / `{ mode }` | mode / `void` |
+| ✓ | `config.get` | — | `~/.freecode/config.json`, **redacted** |
+| ✓ | `config.setApiKey` | `{ provider, apiKey, model? }` | `void` |
+| ✓ | `config.setWebCredential` | `{ provider, credential }` | `void` |
+| ✓ | `config.getCurrentModel` | — | current provider/model pair |
+| ✓ | `config.setCurrentModel` | `{ provider, model }` | `void` |
+| ✓ | `config.getLastAgentMode` | — | mode or `undefined` |
+| ✓ | `config.setLastAgentMode` | `{ mode }` | `void` |
 
 `config.get` returns the file with every secret replaced by whether it is set:
 each provider entry becomes `{ hasApiKey, model?, authMode? }` and each `web`
@@ -130,14 +146,14 @@ otherwise hand out API keys.
 
 | ✓ | Method | Params | Result |
 | --- | --- | --- | --- |
-|  | `memory.list` | `{ projectPath?, type? }` | `MemoryEntry[]` |
-|  | `memory.get` | `{ name, type, projectPath? }` | `MemoryEntry \| null` |
-|  | `memory.save` | `{ entry, projectPath? }` | `void` |
-|  | `memory.delete` | `{ name, type, projectPath? }` | `boolean` |
-|  | `memory.query` | `{ query, projectPath?, limit?, types? }` | `MemoryEntry[]` — relevance-ranked |
-|  | `memory.buildPrompt` | `{ projectPath?, types?, limit?, all? }` | `string` — the whole memory block, unranked |
-|  | `memory.graph.stats` | `{ projectPath? }` | graph stats |
-|  | `memory.graph.rebuild` | `{ projectPath? }` | graph stats, after rebuilding |
+| ✓ | `memory.list` | `{ projectPath?, type? }` | `MemoryEntry[]` |
+| ✓ | `memory.get` | `{ name, type, projectPath? }` | `MemoryEntry \| null` |
+| ✓ | `memory.save` | `{ entry, projectPath? }` | `void` |
+| ✓ | `memory.delete` | `{ name, type, projectPath? }` | `boolean` |
+| ✓ | `memory.query` | `{ query, projectPath?, limit?, types? }` | `MemoryEntry[]` — relevance-ranked |
+| ✓ | `memory.buildPrompt` | `{ projectPath?, types?, limit?, all? }` | `string` — the whole memory block, unranked |
+| ✓ | `memory.graph.stats` | `{ projectPath? }` | graph stats |
+| ✓ | `memory.graph.rebuild` | `{ projectPath? }` | graph stats, after rebuilding |
 | ✓ | `graph.explore` | — | `{ url }` or `{ error: "not-installed" }` |
 
 `projectPath` defaults to `process.cwd()` everywhere here. `memory.query` routes
@@ -165,6 +181,32 @@ Unanswered prompts time out after **30 minutes**, and a timeout resolves to deny
 If no frontend is listening at all, the ask is rejected immediately — headless
 never means silent allow.
 
+## Background work
+
+| ✓ | Method | Params | Result |
+| --- | --- | --- | --- |
+| ✓ | `shells.list` | `{ sessionId }` | `ShellSummary[]` |
+| ✓ | `shells.output` | `{ sessionId, shellId, cursor? }` | output plus the next cursor |
+| ✓ | `shells.kill` | `{ sessionId, shellId }` | `{ killed }` |
+| ✓ | `shells.remove` | `{ sessionId, shellId }` | `{ removed }` — settled shells only |
+| ✓ | `agents.list` | `{ sessionId }` | `AgentSummary[]` for the root session's tree |
+| ✓ | `agents.output` | `{ sessionId, agentId, cursor? }` | replayable output plus the next cursor |
+| ✓ | `agents.stop` | `{ sessionId, agentId }` | `{ stopped }` |
+| ✓ | `agents.remove` | `{ sessionId, agentId }` | `{ removed }` — settled agents only |
+
+Both output methods are positional reads. Opening a frontend panel does not
+advance the cursor used by the model.
+
+## Extensions
+
+| ✓ | Method | Params | Result |
+| --- | --- | --- | --- |
+| ✓ | `extensions.list` | — | loaded extension sources, scopes, tools, commands, hooks and errors |
+| ✓ | `extensions.reload` | — | reload errors by source |
+
+Reload re-imports extension files and re-registers their tools, commands and
+hooks. This is process-wide rather than scoped to one session.
+
 ## Everything else
 
 | ✓ | Method | Params | Result |
@@ -172,10 +214,12 @@ never means silent allow.
 | ✓ | `commands.list` | `{ projectPath }` | `CommandInfo[]` |
 | ✓ | `commands.resolve` | `{ name, args, projectPath }` | `{ prompt }` — throws if unknown |
 | ✓ | `skills.list` | `{ projectPath? }` | `{ name, description?, scope }[]` |
+| ✓ | `plugins.list` | — | `{ id, name, version?, installPath }[]` |
 | ✓ | `mcp.status` | `{ name? }` | `{ name, type, enabled, status, toolCount, tools }[]` |
 | ✓ | `history.list` | — | `string[]` |
 | ✓ | `history.append` | `{ text }` | `void` |
 | ✓ | `usage.get` | — | `{ date, tokencount }[]` |
+| ✓ | `context.stats` | `{ sessionId }` | token occupancy by prompt category |
 | ✓ | `night.list` | — | `NightRunSummary[]` — every `freecode night` run, crashed ones reconciled; `needsHuman` counted in core |
 | ✓ | `night.report` | `{ runId? }` | `{ runId, markdown }` — regenerated from the run's logs; newest run when omitted |
 | ✓ | `night.stop` | `{ runId }` | `{ stopped }` — sets `cancelRequested`; `false` unless the run is `running` or `pending` |
@@ -227,19 +271,9 @@ still exists in `protocol.ts` for backward compatibility. Prefer `StreamEvent`.
 
 ## Known gaps
 
-Also tracked in `TODO.md`; the first three are shared with
+Also tracked in `TODO.md` and shared with
 [the IPC internals page](/internals/ipc#known-gaps).
 
-- **`METHODS` declares 24 of 49 methods.** All of `memory.*`, `config.*`,
-  `models.*`, and half of `session.*` are missing, so the map `CLAUDE.md` describes
-  as the source of truth is not yet one.
-- **`METHODS["session.send"]` is wrong.** It declares
-  `StreamResponse | { queued, id }`; the handler resolves a `LoopResult`. Its
-  declared params also omit `model` and `agentMode`, both of which the handler
-  reads — a typed client cannot pass them without a cast.
-- **No `-32602` validation.** Every handler casts `params` unchecked, so a mistyped
-  field surfaces as a confusing `-32603` from deep inside instead of an invalid-params
-  error at the boundary.
 - **`graph.explore` breaks the naming convention** and hard-codes `process.cwd()`
   while every neighbouring memory method takes `projectPath`. It should be
   `memory.graph.explore` with the same parameter.

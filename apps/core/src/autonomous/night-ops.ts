@@ -8,6 +8,7 @@
 
 import * as fs from "fs";
 import { readDecisions, readIterations, reportPathFor } from "./night-store.js";
+import { createGitOps } from "./git.js";
 import { renderReport, duration } from "./report.js";
 import { listRuns, readManifest, updateManifest } from "./run-store.js";
 import type { RunManifest } from "./types.js";
@@ -113,6 +114,26 @@ export function buildReport(
   });
   fs.writeFileSync(reportPathFor(manifest.runId), markdown, "utf-8");
   return markdown;
+}
+
+/**
+ * `buildReport` with the git-derived sections filled in from the repository.
+ *
+ * Every regeneration must go through here: `buildReport` alone rewrites
+ * report.md WITHOUT the diffstat and commit subjects, so a plain
+ * `night report` in the morning used to erase the Changes section the run had
+ * written. Measured `base...branch`, not against HEAD, because by morning the
+ * checkout may be on another branch. A repo that can no longer be read (a
+ * removed worktree) yields empty sections, not an error.
+ */
+export async function regenerateReport(manifest: RunManifest): Promise<string> {
+  const night = manifest.night;
+  if (!night?.baseCommit) return buildReport(manifest);
+  const git = createGitOps(manifest.projectPath);
+  return buildReport(manifest, {
+    diffstat: await git.diffstatAgainst(night.baseCommit, night.branch),
+    subjects: await git.subjectsSince(night.baseCommit, night.branch),
+  });
 }
 
 /** Ask a running night to stop at the next iteration boundary. */

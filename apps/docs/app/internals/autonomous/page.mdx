@@ -144,7 +144,9 @@ manifest for `cancelRequested` every second.
 
 ```
 bwrap --die-with-parent --new-session --unshare-{pid,ipc,uts,cgroup-try}
-      --ro-bind / /  --tmpfs $HOME  --tmpfs /tmp  --bind <tree> <tree>
+      --ro-bind / /  --tmpfs $HOME  --tmpfs /tmp
+      [--ro-bind <main .git> <main .git>]      # worktree runs only
+      --bind <tree> <tree>
       --setenv HOME /tmp  --proc /proc  --dev /dev  --chdir <cwd>
       /bin/bash -c <command>
 ```
@@ -154,6 +156,19 @@ bwrap --die-with-parent --new-session --unshare-{pid,ipc,uts,cgroup-try}
 checks by running a minimal sandbox, not `bwrap --version`: `--version` succeeds
 even when the kernel forbids the user namespace that a real sandbox needs. The
 network is shared on purpose.
+
+A worktree's `.git` is a file that points at `<main>/.git/worktrees/<name>`.
+That directory is usually under the hidden `$HOME`, so `worktreeGitDir()`
+resolves the repository's common git dir and mounts it read-only. Without that
+mount, every git command inside a detached run failed with "not a git
+repository".
+
+**The process directory must be the run tree.** The agent loop gives every tool
+`cwd: process.cwd()` (`agent/loop.ts`). `night-run.ts` therefore calls
+`process.chdir()` into the worktree once it exists. Before this fix, bash and
+relative file paths resolved against the user's own checkout. The sandbox
+refused all of those calls, but with `--no-sandbox` they would have run there.
+The first live detached run found both problems.
 
 ## Frontends
 

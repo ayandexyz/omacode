@@ -1204,7 +1204,7 @@ export const methodHandlers: Record<
 
   "night.report": async (params: Record<string, unknown>): Promise<unknown> => {
     const { runId } = params as { runId?: string };
-    const { findNightRun, buildReport } = await import(
+    const { findNightRun, regenerateReport } = await import(
       "./autonomous/night-ops.js"
     );
     const run = findNightRun(runId);
@@ -1212,7 +1212,7 @@ export const methodHandlers: Record<
       throw new Error(runId ? `No night run matching "${runId}"` : "No night runs yet");
     }
     // Regenerated from the logs, so a crashed run has one too.
-    return { runId: run.runId, markdown: buildReport(run) };
+    return { runId: run.runId, markdown: await regenerateReport(run) };
   },
 
   "night.stop": async (params: Record<string, unknown>): Promise<unknown> => {

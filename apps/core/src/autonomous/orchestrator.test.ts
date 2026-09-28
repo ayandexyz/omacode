@@ -191,6 +191,11 @@ test("a reported failure resets the tree and is not committed", async () => {
   assert.equal(result.commits.length, 1);
   assert.deepEqual(h.commitCalls, ["night 2: did a thing"]);
   assert.match(h.notes.join("\n"), /failed \(reported_failure\)/);
+  // The point of an honest failure: the next iteration learns from it.
+  assert.match(h.notes.join("\n"), /dead end/);
+  // And the record still says which session it was, for `freecode trace`.
+  assert.equal(h.records[0]?.sessionId, "s-1");
+  assert.equal(h.records[0]?.turns, 3);
 });
 
 test("three consecutive failures end the run", async () => {

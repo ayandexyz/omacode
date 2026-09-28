@@ -96,6 +96,47 @@ test("a JSON-string array is accepted, and junk entries are dropped", async () =
   assert.equal(u.finish?.decisions.length, 1);
 });
 
+test("MiniMax's garbled nested arguments are untangled, not mangled", async () => {
+  // Verbatim shape from the first live detached night (run 74b18cb1,
+  // MiniMax-M3): its XML tool-call format leaks into nested params — arrays
+  // arrive nested with a stray `</item>`, a decision's `why` swallows the
+  // next field, and the second list item lands under a top-level `item`.
+  const u = unattended();
+  await FinishIterationTool.execute(
+    {
+      success: true,
+      summary: "tidy two phase markers",
+      key_changes: [["types.ts: fixed the PID JSDoc</item>"]] as never,
+      key_learnings: [["phase headers go stale</item>"]] as never,
+      decisions: [
+        {
+          question: "Scope of edits",
+          choice: "two markers only",
+          why: "both are unambiguously wrong</why>\n<reversible>true",
+        },
+      ],
+      item: {
+        question: "Verification",
+        choice: "re-read the regions",
+        why: "comments cannot change behaviour</why>\n<reversible>true",
+      },
+      needs_human: [],
+      should_stop: false,
+    } as never,
+    ctx(u),
+  );
+
+  assert.deepEqual(u.finish?.keyChanges, ["types.ts: fixed the PID JSDoc"]);
+  assert.deepEqual(u.finish?.keyLearnings, ["phase headers go stale"]);
+  assert.deepEqual(
+    u.finish?.decisions.map((d) => [d.question, d.why, d.reversible]),
+    [
+      ["Scope of edits", "both are unambiguously wrong", true],
+      ["Verification", "comments cannot change behaviour", true],
+    ],
+  );
+});
+
 test("the second call is ignored — the first report is the one that counts", async () => {
   const u = unattended();
   await FinishIterationTool.execute({ success: true, summary: "first" }, ctx(u));

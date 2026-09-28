@@ -171,6 +171,17 @@ test("the review block hands over the exact commands, including how to discard i
   assert.match(md, /git branch -D night\/reduce-the-tui-render-cost/);
 });
 
+test("the review range starts at the recorded branch point, not main", () => {
+  // The first live night branched off `autonomous`; `main..branch` listed
+  // every commit on that branch as if the night had made them.
+  const md = renderReport(
+    input({ night: { ...input().night, baseCommit: "0123456789abcdef" } }),
+  );
+  assert.match(md, /git log --oneline 0123456789ab\.\.night\/reduce-the-tui-render-cost/);
+  assert.match(md, /git diff 0123456789ab\.\.\.night\/reduce-the-tui-render-cost --stat/);
+  assert.doesNotMatch(md, /main\.\./);
+});
+
 test("a run with no --verify says so rather than implying the commits were checked", () => {
   assert.match(renderReport(input()), /NOT verified \(no --verify\)/);
   assert.match(

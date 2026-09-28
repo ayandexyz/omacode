@@ -28,6 +28,8 @@ interface FinishParams {
   decisions?: unknown;
   needs_human?: unknown;
   should_stop?: unknown;
+  /** Not in the schema — where MiniMax spills a list's second item. */
+  item?: unknown;
 }
 
 // A `type` on every property, per the CLAUDE.md tool checklist: a missing one
@@ -93,21 +95,53 @@ function validateFinishInput(
   return { valid: true };
 }
 
+/**
+ * MiniMax's XML tool-call format leaks into nested params (first live night,
+ * run 74b18cb1): a list item ends in `</item>`, and a field can swallow the
+ * next one — `why: "…</why>\n<reversible>true"`. Returns the text with the
+ * residue cut off, plus the swallowed field if there was one.
+ */
+const TAG_RESIDUE = /\s*<\/[A-Za-z_]+>\s*(?:<([A-Za-z_]+)>([\s\S]*))?$/;
+
+function untag(text: string): { text: string; spilled?: [string, string] } {
+  const match = TAG_RESIDUE.exec(text);
+  if (!match) return { text: text.trim() };
+  return {
+    text: text.slice(0, match.index).trim(),
+    ...(match[1] ? { spilled: [match[1], (match[2] ?? "").trim()] } : {}),
+  };
+}
+
 /** Tolerant on purpose: a dropped list costs the report, not the iteration. */
 function stringList(value: unknown): string[] {
   const raw = typeof value === "string" ? safeParse(value) : value;
   if (!Array.isArray(raw)) return [];
+  // `flat`: MiniMax nests a list one level deeper than the schema says.
   return raw
-    .map((item) => (typeof item === "string" ? item : JSON.stringify(item)))
+    .flat(Infinity)
+    .map((item) =>
+      typeof item === "string" ? untag(item).text : JSON.stringify(item),
+    )
     .filter((s) => s.trim() !== "");
 }
 
-function decisionList(value: unknown): IterationDecision[] {
-  const raw = typeof value === "string" ? safeParse(value) : value;
-  if (!Array.isArray(raw)) return [];
+function decisionList(value: unknown, spilledItem?: unknown): IterationDecision[] {
+  const parsed = typeof value === "string" ? safeParse(value) : value;
+  const raw = Array.isArray(parsed) ? parsed.flat(Infinity) : [];
+  // MiniMax puts a list's second item under a top-level `item`; keep it
+  // rather than lose a decision the user should see.
+  if (spilledItem && typeof spilledItem === "object" && !Array.isArray(spilledItem)) {
+    raw.push(spilledItem);
+  }
   return raw.flatMap((item) => {
     if (!item || typeof item !== "object") return [];
-    const d = item as Record<string, unknown>;
+    const d = { ...(item as Record<string, unknown>) };
+    for (const key of ["question", "choice", "why"]) {
+      if (typeof d[key] !== "string") continue;
+      const { text, spilled } = untag(d[key] as string);
+      d[key] = text;
+      if (spilled && d[spilled[0]] === undefined) d[spilled[0]] = spilled[1];
+    }
     const question = String(d.question ?? "").trim();
     const choice = String(d.choice ?? "").trim();
     if (!question || !choice) return [];
@@ -166,7 +200,7 @@ async function executeFinish(
     summary: params.summary.trim(),
     keyChanges: stringList(params.key_changes),
     keyLearnings: stringList(params.key_learnings),
-    decisions: decisionList(params.decisions),
+    decisions: decisionList(params.decisions, params.item),
     needsHuman: stringList(params.needs_human),
     shouldStop: coerceBoolean(params.should_stop) ?? false,
   };

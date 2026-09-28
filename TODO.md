@@ -803,12 +803,3 @@ set `FREECODE_EVAL_KEEP_SANDBOX=1` and keep the store to confirm.
       §7.2's rejected `consolidate-production-endpoint` result — a merge that
       drops content from the entries it folds together. Check what the merge
       prompt keeps when combining entries that each hold part of a table.
-
-## Docs findings (overnight runs — 2026-09-28)
-
-Found while writing `apps/docs/app/guides/overnight-runs/page.mdx`.
-
-- [ ] **`reference/ipc-methods` is stale beyond this branch.** It claims "49
-      implemented, 24 declared" and lists 53 rows; `server.ts` and `METHODS` both
-      have 71 today (`agents.*`, `shells.*`, `session.tree|navigate|rewind…`,
-      `plugins.list`, … are missing). Only the three `night.*` rows were added.
