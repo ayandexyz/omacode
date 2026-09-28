@@ -159,6 +159,30 @@ export async function runTrial(
 }
 
 /**
+ * The same `UnattendedContext` a night run builds, minus the persistence: what
+ * the model sees and what it is refused must match production exactly, or the
+ * suite measures a harness that does not ship. Records are dropped — the
+ * trajectory scorer reads the trace, not this.
+ */
+async function buildUnattendedContext(
+  tree: string,
+): Promise<import("../autonomous/types.js").UnattendedContext> {
+  const { decideUnattendedAsk, REFUSAL_TEXT } = await import(
+    "../autonomous/envelope.js"
+  );
+  return {
+    iteration: 1,
+    decideAsk(toolName, args) {
+      const verdict = decideUnattendedAsk({ tree, toolName, args });
+      return verdict.allowed
+        ? { allowed: true }
+        : { allowed: false, reason: verdict.reason ?? REFUSAL_TEXT };
+    },
+    record: () => {},
+  };
+}
+
+/**
  * Set the case's env, returning the undo. Restores an absent variable by
  * deleting it rather than setting "" — the compaction knobs treat an empty
  * string as unset, but nothing guarantees the next key added will.
@@ -298,11 +322,30 @@ async function runTrialIn(
     }
   };
 
+  // An unattended case is scored on what `freecode night` would actually offer
+  // the model: finish_iteration on the tool list, `question` answering itself,
+  // and the envelope deciding permission asks against the sandbox — NOT the
+  // blanket allow above, which would make an envelope case unmeasurable by
+  // approving the very call it is supposed to refuse. `dataset.ts` guarantees
+  // an unattended case is sandboxed.
+  const unattended = kase.unattended
+    ? await buildUnattendedContext(projectPath)
+    : undefined;
+
   const startedAt = Date.now();
   let memoryJobsPending = 0;
   try {
     const loop = await getAppRuntime().runPromise(
-      createAgentLoopEffect(sessionId),
+      createAgentLoopEffect(
+        sessionId,
+        unattended
+          ? {
+              unattended,
+              sessionDenies: (await import("../autonomous/envelope.js"))
+                .ENVELOPE_DENY_RULES,
+            }
+          : undefined,
+      ),
     );
     // One user turn per prompt, on the same session and the same loop. Each
     // `run()` reloads history from the store, so a follow-up sees everything

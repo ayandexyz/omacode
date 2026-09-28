@@ -720,9 +720,15 @@ Each phase is shippable and revertible on `autonomous`.
   fake git/clock/iterations), `envelope.test.ts`, `finish-iteration.test.ts`,
   `night-store.test.ts`, `git.test.ts` (a real repo in a tmpdir: commit lands,
   failure leaves no trace, pre-commit failure keeps the work, `main` untouched).
-  **Still open:** `evals/night.jsonl` finish-compliance ≥ 90% on the default
-  provider before Phase 2 — real paid turns, so it is a deliberate spend, and
-  §6 failure mode 1 stays unmeasured until it runs.
+  `evals/night.jsonl` is **written** (5 cases) and **unrun**: finish-compliance
+  ≥ 90% on the default provider is still the bar before Phase 2, and it costs
+  real turns, so running it is a deliberate spend. §6 failure mode 1 stays
+  unmeasured until then. The suite needed one harness field — `EvalCase.
+  unattended`, the only one that changes the loop's wiring — because
+  `finish_iteration` is not on an attended tool list and the runner's blanket
+  permission allow would approve the very `git commit` the envelope case exists
+  to see refused. It requires `files` for the same reason a mutating agentMode
+  does: the envelope is defined relative to the run's tree.
 
   As built: `autonomous/{orchestrator,iteration,prompt,envelope,git,night-store}.ts`,
   `tools/finish-iteration.ts`, `cli/commands/night{,-run}.ts`. The loop learned

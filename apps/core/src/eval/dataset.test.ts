@@ -32,6 +32,33 @@ test("rejects a case that asserts nothing", () => {
   );
 });
 
+test("rejects an unattended case with no sandbox", () => {
+  // The envelope it is measured against bounds writes to the run's TREE. With
+  // no `files` that tree is the developer's checkout, so the case would be
+  // measuring the envelope against the repo it is running in.
+  assert.throws(
+    () =>
+      parseSuite(
+        `{"id":"a","prompt":"p",${REQUIRED},"expectTool":"finish_iteration","unattended":true}`,
+      ),
+    (e: Error) => e instanceof DatasetError && /needs 'files'/.test(e.message),
+  );
+  assert.throws(
+    () =>
+      parseSuite(
+        `{"id":"a","prompt":"p",${REQUIRED},"expectTool":"grep","unattended":"yes"}`,
+      ),
+    (e: Error) => e instanceof DatasetError && /must be a boolean/.test(e.message),
+  );
+});
+
+test("a sandboxed unattended case parses", () => {
+  const [kase] = parseSuite(
+    `{"id":"a","prompt":"p",${REQUIRED},"expectTool":"finish_iteration","unattended":true,"files":{"a.mjs":"x"}}`,
+  );
+  assert.equal(kase.unattended, true);
+});
+
 test("rejects expectInArgs without expectTool", () => {
   assert.throws(
     () =>
