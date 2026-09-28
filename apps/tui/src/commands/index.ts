@@ -67,6 +67,8 @@ export interface CommandContext extends MessageCreators {
    * as the shells panel: only it holds the root session id.
    */
   showAgentsPanel?(): Promise<void>;
+  /** The `/night` card — overnight runs, read-only (they are separate processes). */
+  showNightPanel?(): Promise<void>;
   /** Trigger manual compaction of the current session (the /compact command). */
   compactSession?(): Promise<void>;
   /**

@@ -232,6 +232,20 @@ function validate(raw: unknown, where: string): EvalCase {
     }
   }
 
+  // Same reasoning as a mutating agentMode: an unattended turn writes, and the
+  // envelope it is measured against is defined relative to the run's own tree.
+  if (o.unattended !== undefined) {
+    if (typeof o.unattended !== "boolean") {
+      throw new DatasetError(`${where}: 'unattended' must be a boolean`);
+    }
+    if (o.unattended && !files) {
+      throw new DatasetError(
+        `${where}: 'unattended' needs 'files'. The envelope bounds writes to ` +
+          `the run's tree, and without a sandbox that tree is the real checkout.`,
+      );
+    }
+  }
+
   return {
     id,
     prompt,
@@ -258,6 +272,7 @@ function validate(raw: unknown, where: string): EvalCase {
     sessions,
     sessionFollowUps,
     consolidateBeforeFinal,
+    unattended: o.unattended === true ? true : undefined,
     verify: typeof o.verify === "string" ? o.verify : undefined,
     immutable,
     rubric,

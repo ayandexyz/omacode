@@ -146,4 +146,165 @@ export interface RunManifest {
   cancelRequested?: boolean;
 
   taskCardCount: number;
+
+  /** Present on a `freecode night` run, absent on an old autonomous one. */
+  night?: NightManifestFields;
+}
+
+// =============================================================================
+// Overnight runs (`freecode night`) — spec 2026-09-28-overnight-runs.md.
+// A run is a sequence of ITERATIONS: each one a fresh session doing one small
+// verifiable step, ending in a `finish_iteration` call. The orchestrator, not
+// the model, commits, resets, and decides when the night is over.
+// =============================================================================
+
+/**
+ * The night-run fields on a `RunManifest`. Kept in one optional block rather
+ * than spread across the manifest: Phase 0's shape belongs to the older
+ * autonomous design, and a night run should not have to pretend to be one.
+ *
+ * Updated after every iteration, so `freecode night status` from another
+ * terminal reads real progress rather than whatever was true at startup.
+ */
+export interface NightManifestFields {
+  objective: string;
+  branch: string;
+  /**
+   * The commit the branch started from. The report's review range and
+   * diffstat are measured from it, never from `main`: a night may branch off
+   * anything, and a resumed leg must still report the whole night.
+   */
+  baseCommit?: string;
+  stopWhen?: string;
+  verifyCommand?: string;
+  /** Iterations attempted so far (a retried wait does not increment it). */
+  iterations: number;
+  /** Commit hashes on the run's branch, oldest first. */
+  commits: string[];
+  waitedMs: number;
+  fallbackIterations: number[];
+  fallbackModel?: string;
+  stopReason?: string;
+  /** Left in the tree when the run ended. Absent means nothing was. */
+  uncommitted?: string[];
+  /** Phase 5 lifecycle metadata. A pending scheduled run has not started yet. */
+  detached?: boolean;
+  scheduledFor?: number;
+  logPath?: string;
+  /** Whether unattended shell commands are confined to the run tree. */
+  sandbox?: boolean;
+  commitStyle?: "night" | "conventional";
+}
+
+/** What the model reports through `finish_iteration` (§4.4). */
+export interface FinishIterationResult {
+  /** Meaningful progress was made. `false` ⇒ the orchestrator discards the tree. */
+  success: boolean;
+  /** One sentence; becomes the commit subject. */
+  summary: string;
+  keyChanges: string[];
+  keyLearnings: string[];
+  decisions: IterationDecision[];
+  needsHuman: string[];
+  /** The objective is fully met — end the run, don't just end the iteration. */
+  shouldStop?: boolean;
+}
+
+export interface IterationDecision {
+  question: string;
+  choice: string;
+  why: string;
+  reversible: boolean;
+}
+
+/**
+ * Why an iteration did not produce a commit. `no_finish` is the one to watch:
+ * it means the model stopped without calling the finish tool (§6 failure mode 1).
+ */
+export type IterationFailureReason =
+  | "reported_failure"
+  | "no_finish"
+  | "no_op"
+  | "turn_cap"
+  | "stuck"
+  | "timeout"
+  | "commit_failed"
+  | "verify_failed"
+  | "provider"
+  | "quota"
+  | "auth"
+  | "interrupted";
+
+export interface IterationRecord {
+  kind: "iteration";
+  n: number;
+  sessionId: string;
+  startedAt: number;
+  endedAt: number;
+  /** Committed ⇒ the step is on the branch. */
+  commit?: string;
+  failure?: IterationFailureReason;
+  summary?: string;
+  filesChanged?: number;
+  usd?: number;
+  turns: number;
+}
+
+/**
+ * One wait on a spent quota, written to `iterations.jsonl` beside the
+ * iterations so the morning can account for a night that produced three
+ * commits and eight hours of sleep.
+ */
+export interface WaitRecord {
+  kind: "wait";
+  /** The iteration that will be retried once the wait ends. */
+  n: number;
+  from: number;
+  until: number;
+  reason: string;
+  provider: string;
+}
+
+/** A denial or a self-answered question, for the morning report (§4.5, §4.6). */
+export type Decision =
+  | { kind: "asked"; iteration: number; at: number; questions: string[] }
+  | {
+      kind: "decided";
+      iteration: number;
+      at: number;
+      question: string;
+      choice: string;
+      why: string;
+      reversible: boolean;
+    }
+  | {
+      kind: "denied";
+      iteration: number;
+      at: number;
+      tool: string;
+      target?: string;
+      rule: string;
+    }
+  | { kind: "needs_human"; iteration: number; at: number; item: string };
+
+/**
+ * The seam between the agent loop and an unattended run. The loop knows only
+ * this interface: it consults `decideAsk` instead of prompting a human, hands
+ * it to tools through `ToolContext`, and ends the run once `finish` is set.
+ * Nothing here is visible in an attended session.
+ */
+export interface UnattendedContext {
+  /** 1-based iteration number, for every record written. */
+  iteration: number;
+  /** Set by `finish_iteration`. The loop ends the run after that batch. */
+  finish?: FinishIterationResult;
+  /** Answer a permission `ask` without a human (§4.6). */
+  decideAsk(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): { allowed: boolean; reason?: string };
+  /** Record a self-answered question or a refusal for the report. */
+  record(decision: Decision): void;
+  /** Passed to the bash tool; absent keeps attended shells unchanged. */
+  sandbox?: { projectPath: string };
 }

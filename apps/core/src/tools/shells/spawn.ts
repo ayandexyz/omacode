@@ -12,6 +12,14 @@
 // =============================================================================
 
 import { spawn, type ChildProcess } from "child_process";
+import {
+  sandboxEnvironment,
+  sandboxPlan,
+} from "../../autonomous/sandbox.js";
+
+export interface ShellSandbox {
+  projectPath: string;
+}
 
 export interface SpawnedShell {
   child: ChildProcess;
@@ -19,15 +27,23 @@ export interface SpawnedShell {
   killTree: (signal: NodeJS.Signals) => void;
 }
 
-export function spawnShell(command: string, cwd: string): SpawnedShell {
+export function spawnShell(
+  command: string,
+  cwd: string,
+  sandbox?: ShellSandbox,
+): SpawnedShell {
   const isWindows = process.platform === "win32";
-  const shell = isWindows ? "cmd.exe" : "/bin/bash";
-  const shellArgs = isWindows ? ["/c", command] : ["-c", command];
+  const plan = sandbox
+    ? sandboxPlan(command, cwd, sandbox.projectPath)
+    : {
+        command: isWindows ? "cmd.exe" : "/bin/bash",
+        args: isWindows ? ["/c", command] : ["-c", command],
+      };
 
-  const child = spawn(shell, shellArgs, {
+  const child = spawn(plan.command, plan.args, {
     cwd,
     env: {
-      ...process.env,
+      ...(sandbox ? sandboxEnvironment() : process.env),
       GIT_TERMINAL_PROMPT: "0",
       DEBIAN_FRONTEND: "noninteractive",
       APT_LISTCHANGES_FRONTEND: "none",

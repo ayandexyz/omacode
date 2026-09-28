@@ -25,6 +25,7 @@ const DISPLAY_NAMES: Record<string, string> = {
   skill: "Skill",
   output: "Output",
   memory: "Memory",
+  finish_iteration: "FinishIteration",
   mcp: "MCP",
 };
 

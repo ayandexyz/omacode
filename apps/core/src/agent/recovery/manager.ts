@@ -13,6 +13,7 @@ import { Effect } from "effect";
 import { BusEvents } from "../../bus/index.js";
 import { readConfig } from "../../providers/config.js";
 import { logger } from "../../utils/logger.js";
+import type { LoopFailure } from "../types.js";
 
 // =============================================================================
 // RecoveryPolicy — per spec (2026-05-25-agent-loop.md:475-487)
@@ -140,6 +141,7 @@ const QUOTA_EXHAUSTED_PATTERNS = [
  */
 export function isQuotaExhaustedError(error: unknown): boolean {
   if (!error) return false;
+  if (error instanceof QuotaExhaustedError) return true;
   const status = getErrorStatus(error);
   // 402 is unambiguous; the rest arrive as 429 alongside ordinary rate limits.
   if (status !== undefined && status !== 429 && status !== 402) return false;
@@ -148,6 +150,179 @@ export function isQuotaExhaustedError(error: unknown): boolean {
     (unwrapProviderError(error) as Error)?.message ?? error,
   ).toLowerCase();
   return QUOTA_EXHAUSTED_PATTERNS.some((pattern) => msg.includes(pattern));
+}
+
+// =============================================================================
+// Quota exhaustion — typed, so an unattended orchestrator can tell "your
+// 5-hour window is spent, come back at 04:13" from "your card is empty".
+// Spec: docs/specs/2026-09-28-overnight-runs.md §4.7
+// =============================================================================
+
+// Only headers that describe the limit itself. Everything else on a provider
+// error can carry account or request detail, and this ends up in the rollout
+// log — which must stay leak-free.
+const RATE_LIMIT_HEADER_PREFIXES = [
+  "retry-after",
+  "ratelimit-",
+  "x-ratelimit-",
+  "anthropic-ratelimit-",
+];
+
+/** The limit-describing response headers of a provider error, if any. */
+export function rateLimitHeaders(
+  error: unknown,
+): Record<string, string> | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const headers = (error as { responseHeaders?: Record<string, string> })
+    .responseHeaders;
+  if (!headers) return undefined;
+  const picked: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const key = name.toLowerCase();
+    if (RATE_LIMIT_HEADER_PREFIXES.some((p) => key.startsWith(p))) {
+      picked[key] = value;
+    }
+  }
+  return Object.keys(picked).length > 0 ? picked : undefined;
+}
+
+function parseResetHeader(value: string): number | undefined {
+  // Providers send a reset as either epoch seconds or an ISO timestamp.
+  const asNumber = Number.parseFloat(value);
+  if (!Number.isNaN(asNumber) && /^\s*\d+(\.\d+)?\s*$/.test(value)) {
+    // Seconds, not milliseconds: every provider that sends epoch here uses s.
+    return asNumber * 1000;
+  }
+  const asDate = Date.parse(value);
+  return Number.isNaN(asDate) ? undefined : asDate;
+}
+
+/**
+ * When the allowance comes back, in epoch ms, read from the error's rate-limit
+ * headers. `retry-after*` is relative to now; a `*-reset` header is absolute.
+ * Which headers Anthropic's OAuth path actually sends on a spent subscription
+ * window is unmeasured — this reads all the usual spellings so the first real
+ * 429 tells us, via the recorded headers on `model.error`.
+ */
+export function quotaResetAt(error: unknown, now = Date.now()): number | undefined {
+  const headers = rateLimitHeaders(error);
+  if (!headers) return undefined;
+
+  const afterMs = headers["retry-after-ms"];
+  if (afterMs) {
+    const parsed = Number.parseFloat(afterMs);
+    if (!Number.isNaN(parsed)) return now + parsed;
+  }
+  const after = headers["retry-after"];
+  if (after) {
+    const seconds = Number.parseFloat(after);
+    if (!Number.isNaN(seconds) && /^\s*\d+(\.\d+)?\s*$/.test(after)) {
+      return now + seconds * 1000;
+    }
+    const asDate = Date.parse(after);
+    if (!Number.isNaN(asDate)) return asDate;
+  }
+  // Prefer the soonest reset: a spent minute-bucket returns sooner than a
+  // spent day-bucket, and waiting for the later one wastes the night.
+  const resets = Object.entries(headers)
+    .filter(([name]) => name.endsWith("-reset"))
+    .map(([, value]) => parseResetHeader(value))
+    .filter((at): at is number => at !== undefined && at > now);
+  return resets.length > 0 ? Math.min(...resets) : undefined;
+}
+
+export type QuotaScope = "window" | "credits" | "unknown";
+
+// Spent money, not a spent window: no reset time exists and waiting is futile.
+const CREDIT_PATTERNS = [
+  "credit balance",
+  "insufficient credit",
+  "purchase credits",
+  "exceeded your current quota",
+  "billing",
+  "payment required",
+  "upgrade your",
+];
+
+/**
+ * `credits` means waiting cannot help (abort); `window` means it can (sleep
+ * until the reset); `unknown` means probe. Read from the message and headers
+ * only — the auth mode is not visible here, so an OAuth window with neither a
+ * reset header nor a telling message classifies `unknown` and gets probed.
+ */
+export function classifyQuotaScope(error: unknown): QuotaScope {
+  const status = (error as { statusCode?: number })?.statusCode;
+  const message = String((error as Error)?.message ?? error ?? "").toLowerCase();
+  if (status === 402 || CREDIT_PATTERNS.some((p) => message.includes(p))) {
+    return "credits";
+  }
+  if (quotaResetAt(error) !== undefined) return "window";
+  if (message.includes("resets at") || message.includes("usage limit reached")) {
+    return "window";
+  }
+  return "unknown";
+}
+
+/**
+ * Carries only what an orchestrator needs to decide whether to wait. It
+ * deliberately does NOT wrap the provider error: that object holds
+ * `requestBodyValues` — the whole conversation — and this one gets logged.
+ */
+export class QuotaExhaustedError extends Error {
+  readonly scope: QuotaScope;
+  readonly resetAt?: number;
+  readonly provider: string;
+  readonly headers?: Record<string, string>;
+
+  constructor(
+    message: string,
+    opts: {
+      provider: string;
+      scope: QuotaScope;
+      resetAt?: number;
+      headers?: Record<string, string>;
+    },
+  ) {
+    super(message);
+    this.name = "QuotaExhaustedError";
+    this.provider = opts.provider;
+    this.scope = opts.scope;
+    this.resetAt = opts.resetAt;
+    this.headers = opts.headers;
+  }
+}
+
+/**
+ * Turn whatever ended a run into the typed reason an orchestrator acts on.
+ * Only the classes providers actually produce — anything unrecognised is
+ * `provider`, which means "retry the step", the safe default.
+ */
+export function classifyLoopFailure(error: unknown): LoopFailure {
+  if (error instanceof QuotaExhaustedError) {
+    return {
+      kind: "quota",
+      scope: error.scope,
+      resetAt: error.resetAt,
+      provider: error.provider,
+    };
+  }
+  if (isAbortError(error)) return { kind: "interrupted" };
+  if (isQuotaExhaustedError(error)) {
+    return {
+      kind: "quota",
+      scope: classifyQuotaScope(error),
+      resetAt: quotaResetAt(error),
+      provider: "unknown",
+    };
+  }
+  const status = getErrorStatus(error);
+  // The OAuth "not allowed for this organization" 403 is handled at the fetch
+  // and falls back to the API key, so it never reaches here as a failure.
+  if (status === 401 || status === 403) return { kind: "auth" };
+  if (isNativeTimeoutError(error)) return { kind: "timeout" };
+  const message = String((error as Error)?.message ?? error ?? "");
+  if (/timed out|timeout/i.test(message)) return { kind: "timeout" };
+  return { kind: "provider", message: describeProviderError(error) };
 }
 
 /**
@@ -454,7 +629,12 @@ export function createRecoveryManager(
       if (isQuotaExhaustedError(lastError)) {
         const message = quotaExhaustedMessage(chain, lastError);
         BusEvents.sessionError(ctx.sessionId, message);
-        throw new Error(message);
+        throw new QuotaExhaustedError(message, {
+          provider: chain[chain.length - 1] ?? "unknown",
+          scope: classifyQuotaScope(lastError),
+          resetAt: quotaResetAt(lastError),
+          headers: rateLimitHeaders(lastError),
+        });
       }
 
       BusEvents.sessionError(

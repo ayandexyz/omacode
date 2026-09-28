@@ -1175,6 +1175,56 @@ export const methodHandlers: Record<
   // --- Subagents (TUI agents panel) ----------------------------------------
   // `sessionId` is the ROOT session; the registry resolves the tree, so a
   // frontend never has to learn a subagent's synthetic id to list one.
+  // ---- Overnight runs. Pure reads of what a separate `freecode night`
+  // process left on disk; the daemon never runs one, detached or not.
+  "night.list": async (): Promise<unknown[]> => {
+    const { listNightRuns } = await import("./autonomous/night-ops.js");
+    const { readDecisions } = await import("./autonomous/night-store.js");
+    return listNightRuns().map((m) => ({
+      runId: m.runId,
+      status: m.status,
+      objective: m.night!.objective,
+      branch: m.night!.branch,
+      stopReason: m.night!.stopReason,
+      iterations: m.night!.iterations,
+      commits: m.night!.commits.length,
+      waitedMs: m.night!.waitedMs,
+      startedAt: m.startedAt,
+      endedAt: m.endedAt,
+      usd: m.usage.usd,
+      provider: m.provider,
+      model: m.model,
+      uncommitted: m.night!.uncommitted?.length ?? 0,
+      // Counted here rather than in the frontend: what "needs you" means is
+      // the run's business, and four clients must not each decide it.
+      needsHuman: readDecisions(m.runId).filter((d) => d.kind === "needs_human")
+        .length,
+    }));
+  },
+
+  "night.report": async (params: Record<string, unknown>): Promise<unknown> => {
+    const { runId } = params as { runId?: string };
+    const { findNightRun, regenerateReport } = await import(
+      "./autonomous/night-ops.js"
+    );
+    const run = findNightRun(runId);
+    if (!run?.night) {
+      throw new Error(runId ? `No night run matching "${runId}"` : "No night runs yet");
+    }
+    // Regenerated from the logs, so a crashed run has one too.
+    return { runId: run.runId, markdown: await regenerateReport(run) };
+  },
+
+  "night.stop": async (params: Record<string, unknown>): Promise<unknown> => {
+    const { runId } = params as { runId: string };
+    const { findNightRun, requestStop } = await import(
+      "./autonomous/night-ops.js"
+    );
+    const run = findNightRun(runId);
+    if (!run?.night) throw new Error(`No night run matching "${runId}"`);
+    return { stopped: requestStop(run) };
+  },
+
   "agents.list": async (
     params: Record<string, unknown>,
   ): Promise<unknown[]> => {

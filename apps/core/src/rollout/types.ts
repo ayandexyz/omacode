@@ -259,6 +259,12 @@ export interface ModelErrorEvent extends BaseEvent {
   /** `stall` = went silent past its budget; `abort` = cancelled by the user. */
   kind: "stall" | "abort" | "provider";
   error: string;
+  /**
+   * The provider's rate-limit response headers, when it sent any — names and
+   * values, nothing else off the error. Recorded so a 429 says WHEN the
+   * allowance returns instead of only that it is gone (overnight-runs §4.7).
+   */
+  rateLimitHeaders?: Record<string, string>;
 }
 
 /**

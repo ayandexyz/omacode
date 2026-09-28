@@ -1,9 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { handleRequest } from "./server.js";
-import { askQuestion } from "./bus/index.js";
+import { askQuestion, bus } from "./bus/index.js";
+
+// askQuestion rejects at once when nothing is subscribed (an unattended run
+// must not wait 30 minutes for an answer that cannot come), so these tests
+// stand in for the attached frontend.
+function withFrontend(): () => void {
+  const handler = () => {};
+  bus.on("question.asked", handler);
+  return () => bus.off("question.asked", handler);
+}
 
 test("question.answer resolves a pending askQuestion with the answers", async () => {
+  const detach = withFrontend();
   const p = askQuestion("req-1", [
     { question: "Pick", options: [{ label: "A", description: "a" }] },
   ] as any);
@@ -15,9 +25,11 @@ test("question.answer resolves a pending askQuestion with the answers", async ()
   });
   assert.equal((res as any).error, undefined);
   assert.deepEqual(await p, ["A"]);
+  detach();
 });
 
 test("question.reject rejects a pending askQuestion", async () => {
+  const detach = withFrontend();
   const p = askQuestion("req-2", [
     { question: "Pick", options: [{ label: "A", description: "a" }] },
   ] as any);
@@ -28,6 +40,19 @@ test("question.reject rejects a pending askQuestion", async () => {
     params: { requestId: "req-2" },
   });
   await assert.rejects(p);
+  detach();
+});
+
+test("askQuestion rejects immediately when no frontend is attached", async () => {
+  // Headless (`freecode run`, and every unattended iteration): nobody can
+  // answer, so waiting out PROMPT_TIMEOUT_MS only delays the same rejection
+  // by 30 minutes. Mirrors askPermission.
+  await assert.rejects(
+    askQuestion("req-headless", [
+      { question: "Pick", options: [{ label: "A", description: "a" }] },
+    ] as any),
+    /No frontend connected/,
+  );
 });
 
 test("providers.list only offers providers the registry can construct", async () => {

@@ -46,6 +46,7 @@ function readSettingsFile(filePath: string): PermissionSettings {
 export class PermissionSettingsManager {
   private merged: PermissionRuleSet = emptyRuleSet();
   private sessionGrants: PermissionRule[] = [];
+  private sessionDenies: PermissionRule[] = [];
   private watchers: fs.FSWatcher[] = [];
 
   constructor(private projectRoot: string) {
@@ -69,7 +70,7 @@ export class PermissionSettingsManager {
     return {
       allow: [...this.merged.allow, ...this.sessionGrants],
       ask: this.merged.ask,
-      deny: this.merged.deny,
+      deny: [...this.merged.deny, ...this.sessionDenies],
     };
   }
 
@@ -82,6 +83,18 @@ export class PermissionSettingsManager {
     const rule = parseRule(ruleRaw);
     if (!rule) return false;
     this.sessionGrants.push(rule);
+    return true;
+  }
+
+  /**
+   * "Deny for this session" — in-memory only, and the deny tier beats every
+   * allow, so an unattended run's envelope cannot be widened by a user rule
+   * (spec 2026-09-28-overnight-runs.md §4.6).
+   */
+  addSessionDeny(ruleRaw: string): boolean {
+    const rule = parseRule(ruleRaw);
+    if (!rule) return false;
+    this.sessionDenies.push(rule);
     return true;
   }
 

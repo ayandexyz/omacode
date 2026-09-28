@@ -13,6 +13,7 @@ import {
   getErrorStatus,
   describeProviderError,
   createRecoveryManager,
+  QuotaExhaustedError,
 } from "./manager.js";
 
 // Shaped like an AI SDK APICallError.
@@ -157,8 +158,14 @@ test("quota exhaustion is not retried and reports cleanly", async () => {
         { sessionId: "s-quota" },
       ),
     (err: Error) => {
-      // A plain Error, so nothing downstream can print the request body.
-      assert.equal(err.constructor, Error);
+      // Typed for an unattended orchestrator, but it still carries nothing off
+      // the provider error, so nothing downstream can print the request body.
+      assert.ok(err instanceof QuotaExhaustedError);
+      assert.equal(err.provider, "minimax");
+      // MiniMax's wording says to upgrade or buy credits, so waiting cannot
+      // help: `credits` aborts the night instead of sleeping until a reset
+      // that will never come.
+      assert.equal(err.scope, "credits");
       assert.ok(!("requestBodyValues" in err));
       assert.ok(!err.message.includes("my private source code"));
       assert.match(err.message, /quota exhausted/i);

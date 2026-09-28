@@ -23,6 +23,7 @@ import type {
   LoopAction,
   LoopHeuristics,
   UserInput,
+  LoopFailure,
   LoopResult,
   AssistantContent,
   HookContext,
@@ -43,6 +44,7 @@ import type { PermissionRequestResult } from "../hooks/PermissionRequest.js";
 import { evaluatePermission } from "../permission/evaluate.js";
 import { isReadOnlyMode } from "../permission/mode-policy.js";
 import { promptForPermission } from "../permission/prompt.js";
+import { extractTarget } from "../permission/rules.js";
 import { PermissionSettingsManager } from "../permission/settings.js";
 import { createInitialSessionState, DEFAULT_LOOP_HEURISTICS } from "./types.js";
 import {
@@ -110,7 +112,8 @@ import {
 } from "./subagent.js";
 import { CheckpointService } from "../checkpoint/index.js";
 import type { ToolOrchestrator } from "../tools/orchestrator.js";
-import { getToolDefs } from "../tools/defs-cache.js";
+import { getToolDefs, unattendedToolDefs } from "../tools/defs-cache.js";
+import type { UnattendedContext } from "../autonomous/types.js";
 import { planToolBatches } from "../tools/batching.js";
 import { markReadPruned } from "../tools/read-state.js";
 import {
@@ -186,6 +189,8 @@ import {
   RecoveryManagerTag,
 } from "../effect/context.js";
 import {
+  classifyLoopFailure,
+  rateLimitHeaders,
   createRecoveryManagerFromConfig,
   isContextOverflowError,
   type RecoveryManager,
@@ -312,6 +317,20 @@ export interface AgentLoopConfig {
    * settings file. Never beats a deny rule (`evaluate.ts` §3).
    */
   sessionGrants?: string[];
+  /**
+   * In-memory DENY rules for this run. Used by an unattended run to seed its
+   * envelope (spec §4.6): the deny tier beats every allow, so a user's own
+   * allow rule cannot widen it.
+   */
+  sessionDenies?: string[];
+  /**
+   * Set only by an unattended run (`freecode night`). It answers permission
+   * `ask`s without a human, records what it decided, and receives the
+   * iteration's `finish_iteration` report. Its presence is also what puts the
+   * unattended-only tools on the provider's tool list.
+   * Spec: docs/specs/2026-09-28-overnight-runs.md §4.4–§4.6
+   */
+  unattended?: UnattendedContext;
 }
 
 // =============================================================================
@@ -423,10 +442,14 @@ export class AgentLoop {
   // this available, so the run can hand back real content instead of a bare
   // status string.
   private lastResponseText: string | undefined;
+  /** The error object behind the last failed turn (see executeTurn's catch). */
+  private lastTurnError: unknown;
   private compiler: PromptCompiler;
   // Per-rule permission layer: project + user settings + session grants
   private permissionSettings: PermissionSettingsManager | undefined;
   private sessionGrants: string[] | undefined;
+  private sessionDenies: string[] | undefined;
+  private unattended: UnattendedContext | undefined;
   // Cancellation: aborted on interrupt(); threaded into provider requests and
   // tool contexts so in-flight work stops, not just the next loop check.
   private abort = new AbortController();
@@ -549,6 +572,8 @@ export class AgentLoop {
       autoApproveAsks: config?.autoApproveAsks ?? false,
     };
     this.sessionGrants = config?.sessionGrants;
+    this.sessionDenies = config?.sessionDenies;
+    this.unattended = config?.unattended;
     this.memory = config?.memory ?? new MemoryService(sessionId);
     this.hooks = config?.hooks ?? createHookRuntime();
     this.recorder = config?.recorder ?? createRecorder(sessionId);
@@ -825,6 +850,11 @@ export class AgentLoop {
             );
           }
         }
+        for (const rule of this.sessionDenies ?? []) {
+          if (!this.permissionSettings.addSessionDeny(rule)) {
+            logger.warn(`[AgentLoop] Ignoring unparseable deny rule: ${rule}`);
+          }
+        }
         this.permissionSettings.watch();
       }
 
@@ -964,6 +994,7 @@ export class AgentLoop {
             this.lastResponseText ? this.lastResponseText + note : undefined,
             undefined,
             usageSoFar(),
+            { kind: "turn_cap" },
           );
         }
 
@@ -985,6 +1016,7 @@ export class AgentLoop {
             undefined,
             undefined,
             usageSoFar(),
+            { kind: "stuck", reason: healthAction.reason },
           );
         }
         if (healthAction.action === "warn") {
@@ -1087,9 +1119,14 @@ export class AgentLoop {
               undefined,
               undefined,
               usageSoFar(),
+              { kind: "interrupted" },
             );
           }
-          return await this.fail("Turn execution failed", turnResult.error);
+          return await this.fail(
+            "Turn execution failed",
+            turnResult.error,
+            classifyLoopFailure(this.lastTurnError ?? turnResult.error),
+          );
         }
 
         // Advance reminder counters based on what this turn did.
@@ -1161,6 +1198,19 @@ export class AgentLoop {
               usageSoFar(),
             );
           }
+        }
+
+        // finish_iteration ended the iteration. Same exit path as a model
+        // stop, so hooks, memory and usage settle normally; anything the model
+        // said after the tool call is kept as the iteration's text.
+        if (this.unattended?.finish) {
+          await this.stop("iteration_finished");
+          return await this.complete(
+            "Iteration finished",
+            turnResult.responseText,
+            turnResult.thinking,
+            usageSoFar(),
+          );
         }
 
         // No tool calls means the model wants to stop. Outstanding todos do
@@ -1337,7 +1387,7 @@ export class AgentLoop {
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return await this.fail("Loop error", message);
+      return await this.fail("Loop error", message, classifyLoopFailure(error));
     }
   }
 
@@ -2237,6 +2287,9 @@ export class AgentLoop {
         usage: providerResult.usage,
       };
     } catch (error) {
+      // Kept as the object, not the string: classifyLoopFailure needs the
+      // status code and the QuotaExhaustedError instance, which String() eats.
+      this.lastTurnError = error;
       return { success: false, toolResults: [], error: String(error) };
     }
   }
@@ -2320,9 +2373,12 @@ export class AgentLoop {
     const aiProvider = getProvider(provider as any);
     // A definition's allowlist narrows what the mode allows, never widens it.
     const allowed = this.state.role?.tools;
-    const tools = allowed
-      ? getToolDefs(this.state.agentMode).filter((t) => allowed.includes(t.name))
+    const offered = this.unattended
+      ? unattendedToolDefs(this.state.agentMode)
       : getToolDefs(this.state.agentMode);
+    const tools = allowed
+      ? offered.filter((t) => allowed.includes(t.name))
+      : offered;
 
     // Cap tool results in old history turns to prevent token explosion on long
     // sessions. The model already processed those results fully when they were
@@ -2434,6 +2490,10 @@ export class AgentLoop {
             ? "abort"
             : "provider",
         error: err instanceof Error ? err.message : String(err),
+        // Names + values of the limit-describing headers only. This is how we
+        // learn which headers a spent subscription window actually sends
+        // (overnight-runs spec §4.7, Phase 0).
+        rateLimitHeaders: rateLimitHeaders(err),
       });
     };
 
@@ -2988,6 +3048,16 @@ export class AgentLoop {
 
       // Rule/mode deny is absolute — hooks cannot override deny→allow
       if (evaluation.decision === "deny") {
+        // The envelope's own deny rules land here, before any ask. Record them
+        // too, or the morning report would show only the path refusals.
+        this.unattended?.record({
+          kind: "denied",
+          iteration: this.unattended.iteration,
+          at: Date.now(),
+          tool: toolCall.tool,
+          target: extractTarget(toolCall.tool, args),
+          rule: evaluation.matchedRule ?? evaluation.source,
+        });
         const modeRule =
           evaluation.source === "mode-enforced"
             ? evaluation.matchedRule
@@ -3021,7 +3091,19 @@ export class AgentLoop {
       if (decision === "ask") {
         // --yes: nobody is listening, so the ask is answered here rather than
         // round-tripping to a bus that would reject it and read as a denial.
-        if (this.config.autoApproveAsks) {
+        if (this.unattended) {
+          // Nobody is awake to answer. The envelope decides instantly and its
+          // refusals are recorded for the morning report — never a silent deny
+          // and never a 30-minute wait (spec §4.6).
+          const verdict = this.unattended.decideAsk(toolCall.tool, args);
+          if (!verdict.allowed) {
+            return this.denyToolCall(
+              toolCall,
+              "rule",
+              verdict.reason ?? "Refused by the unattended run's envelope.",
+            );
+          }
+        } else if (this.config.autoApproveAsks) {
           logger.debug(
             `[AgentLoop] Auto-approved (--yes): ${toolCall.tool}${evaluation.matchedRule ? ` — ${evaluation.matchedRule}` : ""}`,
           );
@@ -3092,6 +3174,7 @@ export class AgentLoop {
       agentMode: this.state.agentMode,
       provider: this.runModel.provider,
       model: this.runModel.model,
+      unattended: this.unattended,
       abort: this.abort.signal,
     };
 
@@ -3692,7 +3775,11 @@ export class AgentLoop {
     BusEvents.sessionUpdated(this.state.sessionId);
   }
 
-  private async fail(message: string, error?: string): Promise<LoopResult> {
+  private async fail(
+    message: string,
+    error?: string,
+    failure: LoopFailure = { kind: "provider", message: error ?? message },
+  ): Promise<LoopResult> {
     this.cacheWarmer()?.onRunSettled();
     // Emit session.error event
     BusEvents.sessionError(this.state.sessionId, error || message);
@@ -3702,6 +3789,7 @@ export class AgentLoop {
     });
     return {
       success: false,
+      failure,
       message: error || message,
       turnCount: this.state.turnCount,
       iterationCount: this.state.iterationCount,
@@ -3719,6 +3807,12 @@ export class AgentLoop {
       cacheReadInputTokens?: number;
       contextTokens?: number;
     },
+    /**
+     * Set on the exits that report success because they hand back the model's
+     * last words, but did not finish the work: turn cap, loop-health stop,
+     * interrupt. Attended callers ignore it; an unattended one rolls back.
+     */
+    failure?: LoopFailure,
   ): Promise<LoopResult> {
     this.cacheWarmer()?.onRunSettled();
     // Emit session.updated event
@@ -3729,6 +3823,7 @@ export class AgentLoop {
     });
     return {
       success: true,
+      failure,
       message,
       content,
       thinking: thinking ?? this.lastThinking,
@@ -3940,7 +4035,12 @@ export const createAgentLoopEffect = (
   sessionId: string,
   config?: Pick<
     AgentLoopConfig,
-    "maxIterations" | "heuristics" | "autoApproveAsks" | "sessionGrants"
+    | "maxIterations"
+    | "heuristics"
+    | "autoApproveAsks"
+    | "sessionGrants"
+    | "sessionDenies"
+    | "unattended"
   >,
 ): Effect.Effect<
   AgentLoop,

@@ -233,6 +233,16 @@ export interface EvalCase {
    * `FREECODE_DISABLE_MEMORY_CONSOLIDATION=1`.
    */
   consolidateBeforeFinal?: boolean;
+  /**
+   * Run the turn the way `freecode night` runs an iteration: `finish_iteration`
+   * on the tool list, `question` answering itself, and permission asks decided
+   * by the envelope against the sandbox rather than by the runner's blanket
+   * allow (spec 2026-09-28-overnight-runs.md §8 Phase 1).
+   *
+   * Requires `files`. The envelope's whole job is to bound writes to the run's
+   * tree, and without a sandbox that tree would be the developer's checkout.
+   */
+  unattended?: boolean;
   /** Shell command run in the sandbox after the turn; exit code is the score. */
   verify?: string;
   /**

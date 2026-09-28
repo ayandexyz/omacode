@@ -1,8 +1,8 @@
 // =============================================================================
 // System Prompt Loader
-// Loads the single, provider-agnostic FreeCode system prompt from
-// session/prompt/system.md. Per-model identity ("You are powered by ...") is
-// injected separately by the prompt compiler, so one prompt serves every model.
+// Loads the canonical, provider-agnostic FreeCode system prompt from
+// session/prompt/system.md. Per-model identity and small behavioral overlays
+// are injected separately by the prompt compiler; policy stays in one base.
 //
 // Two runtimes to satisfy:
 //   - dev (tsx): the .md sits on disk next to this file — read it directly so

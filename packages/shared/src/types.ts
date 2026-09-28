@@ -518,6 +518,32 @@ export interface ShellSummary {
 export type AgentStatus = "running" | "completed" | "failed" | "killed";
 
 /** One spawned subagent, as the /agents panel renders it. */
+/**
+ * One overnight run, as a frontend sees it. Flat and already formatted-ish:
+ * a night is a separate process, so the TUI reads this off the manifest and
+ * renders it — it never reconstructs a run's state itself.
+ */
+export interface NightRunSummary {
+  runId: string;
+  status: string;
+  objective: string;
+  branch: string;
+  /** Absent while the run is still going. */
+  stopReason?: string;
+  iterations: number;
+  commits: number;
+  waitedMs: number;
+  startedAt?: number;
+  endedAt?: number;
+  usd?: number;
+  provider: string;
+  model?: string;
+  /** Paths still in the tree when it ended — a forced stop never resets. */
+  uncommitted: number;
+  /** Items the run could not decide. The reason to open the report. */
+  needsHuman: number;
+}
+
 export interface AgentSummary {
   id: string;
   /** Session that spawned it: the root session, or another agent. */

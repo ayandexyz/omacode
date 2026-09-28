@@ -321,8 +321,35 @@ export interface UserInput {
   role?: AgentRole;
 }
 
+/**
+ * Why a run ended without doing its work. `success: false` plus a message
+ * string is enough for a human reading a terminal; an unattended orchestrator
+ * has to tell a spent quota window (wait) from spent credits (abort) from a
+ * model that gave up (retry the step).
+ * Spec: docs/specs/2026-09-28-overnight-runs.md §4.7
+ */
+export type LoopFailure =
+  | {
+      kind: "quota";
+      scope: "window" | "credits" | "unknown";
+      resetAt?: number;
+      provider: string;
+    }
+  | { kind: "auth" }
+  | { kind: "interrupted" }
+  | { kind: "turn_cap" }
+  | { kind: "timeout" }
+  | { kind: "stuck"; reason?: string }
+  | { kind: "provider"; message: string };
+
 export interface LoopResult {
   success: boolean;
+  /**
+   * Set whenever the run did not finish its work — including the exits that
+   * report `success: true` because they hand back the model's last words
+   * (turn cap, loop-health stop, interrupt).
+   */
+  failure?: LoopFailure;
   message?: string;
   content?: string;
   thinking?: string; // Extended thinking content from provider

@@ -138,7 +138,15 @@ change does not reach installed binaries.
 Found while reading the `OpenHands/OpenHands` Agent Canvas frontend (`ca4024e3a`)
 for what makes its long-running sessions survivable.
 
-### Unattended mode (blocks `autonomous/` Phase 1)
+### Unattended mode (no longer blocking — `freecode night` shipped around both)
+
+`docs/specs/2026-09-28-overnight-runs.md` is built (Phases 0–5, 2026-09-28) and
+answered both items for night runs without building them as written: per-iteration
+turn/time caps plus reset-on-failure bound a stuck loop (an iteration that stalls
+fails as `turn_cap` / `stuck` / `timeout`, distinct from `provider`/`auth`), and the
+permission envelope decides asks instead of parking them. The items below remain
+open only for a *general* unattended mode outside `freecode night` — e.g. a
+headless `freecode run` that should stop itself or park a prompt.
 
 - [ ] **No configuration in which a stuck loop stops itself.**
       `effect/loop-health.ts` declares `LoopAction { continue | warn | stop }`

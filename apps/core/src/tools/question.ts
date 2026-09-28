@@ -222,6 +222,33 @@ async function executeQuestion(
   }
   const questions = normalized.questions;
 
+  // Unattended run: the bus is never touched. No frontend exists, so asking
+  // would reject instantly anyway — but the CHOICE still has to be made and
+  // recorded, which is the whole point of the morning report (spec §4.5).
+  // The harness deliberately does not pick an option itself: the model wrote
+  // them, their order carries no guaranteed meaning, and a harness pick would
+  // be a decision nobody made.
+  if (ctx.unattended) {
+    ctx.unattended.record({
+      kind: "asked",
+      iteration: ctx.unattended.iteration,
+      at: Date.now(),
+      questions: questions.map((q) => q.question),
+    });
+    return {
+      success: true,
+      result: {
+        title: `No human available (${questions.length} question${questions.length > 1 ? "s" : ""})`,
+        output:
+          "No human is available (unattended run). Decide this yourself: choose the option " +
+          "you would recommend, preferring the reversible one within scope, state your choice " +
+          "in one line, and record it in `finish_iteration.decisions`. If it truly cannot be " +
+          "decided without the user, add it to `needs_human` and move on.",
+        metadata: { unattended: true, questions: questions.length },
+      },
+    };
+  }
+
   const requestId = randomUUID();
 
   const formatted = formatQuestions({ questions });
@@ -259,7 +286,8 @@ async function executeQuestion(
 
 export const QuestionTool: Tool<QuestionParams> = buildTool({
   id: "question",
-  description: "Ask the user clarifying questions during execution",
+  description:
+    "Ask the user structured questions during execution, including when the user explicitly requests this tool",
   schemas: {
     parameters: questionSchema,
   },

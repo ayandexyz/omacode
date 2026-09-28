@@ -46,6 +46,7 @@ export type {
   ShellOutputResult,
   AgentStatus,
   AgentSummary,
+  NightRunSummary,
   AgentOutputResult,
 } from "./types.js";
 
