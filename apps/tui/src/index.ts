@@ -2873,7 +2873,7 @@ function finishCompaction(r: {
 }
 
 // Rows occupied by the input and everything under it (spacer, mode line).
-// Used to lift the bottom-anchored notice so it sits right on top of the input.
+// Used to place the notice and jump pill so they sit right on top of the input.
 function inputChromeHeight(): number {
   const start = tui.children.indexOf(editor);
   if (start < 0) return 0;
@@ -2883,6 +2883,20 @@ function inputChromeHeight(): number {
       (sum, child) => sum + tui.renderChild(child, terminal.columns).length,
       0,
     );
+}
+
+// 1-based terminal row of the input's first line, 0 if it isn't mounted.
+// pi-tui draws from the top until the frame outgrows the terminal, then keeps
+// the bottom in view — so a short session's input sits right under its
+// content, not at the bottom edge.
+function editorTopRow(): number {
+  const idx = tui.children.indexOf(editor);
+  if (idx < 0) return 0;
+  const above = tui.children
+    .slice(0, idx)
+    .reduce((sum, child) => sum + tui.renderChild(child, terminal.columns).length, 0);
+  const chrome = inputChromeHeight();
+  return above + chrome <= terminal.rows ? above + 1 : terminal.rows - chrome + 1;
 }
 
 // Hug the text so a notice stays a single line, capped by what the terminal
@@ -2901,10 +2915,12 @@ function showCopiedIndicator(charCount: number, truncated: boolean): void {
 
   const modal = new NoticeModal(label);
   noticeOverlay = tui.showOverlay(modal, {
-    // Pinned directly above the input instead of floating over the chat. The
-    // jump-to-bottom pill hugs the right edge, so the two don't collide.
-    anchor: "bottom-center",
-    offsetY: -inputChromeHeight(),
+    // Pinned directly above the input instead of floating over the chat —
+    // which is not always the bottom row, since a short session's input sits
+    // right under its content. The jump-to-bottom pill hugs the right edge,
+    // so the two don't collide.
+    anchor: "top-center",
+    offsetY: Math.max(0, editorTopRow() - 1 - modal.render(noticeWidth(modal)).length),
     width: noticeWidth(modal),
     nonCapturing: true,
   });
@@ -2982,20 +2998,12 @@ function jumpButtonHit(cx: number, cy: number): boolean {
 
 /** Which part of the status row's context summary a click at (cx, cy) —
  * 1-based — landed on: 1 the tokens/limit text, 2 the cache ratios, 0 neither.
- * The editor records where it drew them. pi-tui draws from the top until the
- * frame outgrows the terminal, then keeps the bottom in view — so a short
- * session's input sits right under its content, not at the bottom edge. */
+ * The editor records where it drew them. */
 function contextStatusHit(cx: number, cy: number): number {
   const status = editor.lastStatus;
   if (!status) return 0;
-  const idx = tui.children.indexOf(editor);
-  if (idx < 0) return 0;
-  const above = tui.children
-    .slice(0, idx)
-    .reduce((sum, child) => sum + tui.renderChild(child, terminal.columns).length, 0);
-  const chrome = inputChromeHeight();
-  const editorTop =
-    above + chrome <= terminal.rows ? above + 1 : terminal.rows - chrome + 1;
+  const editorTop = editorTopRow();
+  if (editorTop < 1) return 0;
   if (cy !== editorTop + status.row) return 0;
   const col = cx - 1;
   const inside = (r?: [number, number]) => !!r && col >= r[0] && col < r[1];

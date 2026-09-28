@@ -2,18 +2,22 @@
 # apps/web only needs packages/ (workspace deps) and scripts/ (served by
 # /install — see apps/web/app/lib/serve-script.ts); drop the other apps,
 # bench data, and every build output so the archive stays small.
+# This file applies to EVERY Vercel project in the repo, so never list an
+# app that has its own project: apps/docs (Root Directory apps/docs) needs
+# only packages/ too, and ignoring it left that build with no Next.js.
+# Top-level folders are anchored with a leading /: a bare `docs` matches at
+# any depth, which is what removed apps/docs.
 apps/android
 apps/core
-apps/docs
 apps/tui
 apps/tui-rs
 apps/vscode
 apps/web-app
-bench
-docs
-evals
-graft
-schemas
+/bench
+/docs
+/evals
+/graft
+/schemas
 **/node_modules
 **/.next
 **/dist

@@ -17,10 +17,8 @@ test("follow mode renders all lines when content fits the viewport", () => {
   const list = new VirtualMessageList(100, () => 10);
 
   const out = list.render(80);
-  // Padded to content+1 so the editor (rendered below) bottom-anchors to a
-  // stable row instead of floating right under a short history. See the
-  // bottom-anchor note in virtual-message-list.render().
-  assert.equal(out.length, 10);
+  // Not padded: the editor (rendered below) sits right under a short history.
+  assert.equal(out.length, 5);
   assert.equal(list.isScrolled, false);
   list.destroy();
 });
@@ -116,9 +114,8 @@ test("scrolling does nothing when content fits the viewport", () => {
 
   list.scrollPageUp();
   assert.equal(list.isScrolled, false);
-  // Padded to content+1 for bottom-anchoring — same reason as the other
-  // follow-mode test.
-  assert.equal(list.render(80).length, 10);
+  // Not padded — same reason as the other follow-mode test.
+  assert.equal(list.render(80).length, 4);
   list.destroy();
 });
 
