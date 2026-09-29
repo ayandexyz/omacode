@@ -9,7 +9,7 @@ FROM node:22-bookworm-slim
 ARG CLAUDE_CODE_VERSION=2.1.251
 ARG OPENCODE_VERSION=1.18.25
 # A released freecode binary — the self-contained bun build, never the SEA one.
-ARG FREECODE_VERSION=v0.40.0
+ARG FREECODE_VERSION=v0.43.0
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates curl \
@@ -24,7 +24,7 @@ RUN npm install -g \
       tsx@4
 
 RUN curl -fsSL -o /tmp/freecode.tar.gz \
-      https://github.com/ayandexyz/freecode/releases/download/${FREECODE_VERSION}/freecode-linux-x86_64.tar.gz \
+      https://github.com/ayandexyz/omacode/releases/download/${FREECODE_VERSION}/freecode-linux-x86_64.tar.gz \
  && mkdir -p /opt/freecode \
  && tar -xzf /tmp/freecode.tar.gz -C /opt/freecode \
  && ln -s /opt/freecode/freecode /usr/local/bin/freecode \
