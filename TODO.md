@@ -45,23 +45,26 @@ no eval case uses an MCP tool). Reproduce with `pnpm eval trajectory --trials
 1` and Claude Code MCP servers present in `~/.claude.json`.
 
 
-### The compaction eval case is a 20KB JSONL line (added 2026-09-08)
+### The compaction eval cases are 20KB JSONL lines (added 2026-09-08, updated 2026-09-29)
 
 **Status:** known, cosmetic, needs a paid run to fix.
 
-`compaction-survives-multi-file-edit` is 20,339 characters on one line; every
-other case in `evals/coding.jsonl` is 743-921. The spec chose JSONL because it
-is "diffable, appendable, one case per line", and a 20KB line is not diffable —
-any future edit to that case renders as one unreadable changed line.
+Two cases in `evals/coding.jsonl` are ~20KB on one line each —
+`compaction-survives-multi-file-edit` (20,512 chars) and
+`real-tool-call-after-compaction-summary` (20,037); every other case is
+598-995. The spec chose JSONL because it is "diffable, appendable, one case per
+line", and a 20KB line is not diffable — any future edit to either case renders
+as one unreadable changed line (b95523a6, a one-value threshold change, is an
+example).
 
-The six padded fixture modules are what make it big, and they may now be larger
-than they need to be: the padding was sized to grow the transcript, before the
-calibration runs showed that growth is not what gates compaction (user-turn
-count is). They still have to clear the 16,000-token threshold — the base
-request measured ~12.5k WITH the padding — so shrinking them means either a
-smaller threshold or fewer modules, and either way one more calibration run
-(~$0.025) to confirm it still compacts 3/3. Not worth doing on its own; worth
-folding into the next change that touches the case.
+The padded fixture modules are what make them big, and the padding is
+load-bearing: both cases trigger at `FREECODE_AUTO_COMPACT_TOKENS=12000`, and
+b95523a6 had to lower `compaction-survives-multi-file-edit` from 16,000 because
+its prompts had shrunk to a 14.8-15.5K peak on MiniMax-M3 (first call ~10K) and
+it failed 0/3. Shrinking the padding therefore means lowering the threshold
+again while keeping it above the first request, and one calibration run per
+case (~$0.025 each) to confirm each still compacts 3/3. Not worth doing on its
+own; worth folding into the next change that touches either case.
 
 ### Evals cannot answer a `question` call (found 2026-09-29)
 
