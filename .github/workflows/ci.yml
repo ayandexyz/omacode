@@ -53,5 +53,19 @@ jobs:
       - name: Build
         run: pnpm turbo run build
 
-      - name: Test
-        run: pnpm turbo run test
+      # core and tui run under the test-count guard: it fails when a suite
+      # runs no tests, or fewer tests or test files than
+      # .github/test-baselines.json records, which a green exit code cannot
+      # show. Deleting tests on purpose: `node scripts/test-guard.mjs --update
+      # core tui`. Growth only prints that the baseline is stale.
+      - name: Test guard self-check
+        run: node --test scripts/test-guard.test.mjs
+
+      - name: Test (core + tui, count-guarded)
+        run: node scripts/test-guard.mjs core tui
+
+      # Every other package's tests, as before: a new package opts in by
+      # adding a `test` script. Give it a baseline by adding it to SUITES in
+      # scripts/test-guard.mjs.
+      - name: Test (other packages)
+        run: pnpm turbo run test --filter='!@thisisayande/freecode-core' --filter='!@thisisayande/freecode'
