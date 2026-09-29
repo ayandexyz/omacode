@@ -21,15 +21,15 @@ export function SubagentsNode({
       <rect
         x="210"
         y="60"
-        width="160"
+        width="150"
         height="140"
         rx="12"
         className={styles.nodeBoxSubagents}
       />
-      <text x="290" y="85" className={styles.nodeHeader} textAnchor="middle">
+      <text x="285" y="85" className={styles.nodeHeader} textAnchor="middle">
         SUB-AGENTS
       </text>
-      <line x1="225" y1="95" x2="355" y2="95" stroke="rgba(255,255,255,0.1)" />
+      <line x1="225" y1="95" x2="345" y2="95" stroke="rgba(255,255,255,0.1)" />
 
       {/* Mini chip sub-agent cards */}
       <g transform="translate(225, 108)">
@@ -67,7 +67,7 @@ export function SubagentsNode({
       </g>
 
       <text
-        x="290"
+        x="285"
         y="185"
         className={styles.nodeInfoLabel}
         textAnchor="middle"

@@ -195,7 +195,15 @@ export function ToolsNode({ selectedNode, onSelectNode }: ToolsNodeProps) {
         className={styles.nodeInfoLabel}
         textAnchor="middle"
       >
-        Action handler suite
+        Built-in + MCP tools
+      </text>
+      <text
+        x="815"
+        y="340"
+        className={styles.nodeInfoLabel}
+        textAnchor="middle"
+      >
+        22 built-in + connected MCP
       </text>
     </g>
   );

@@ -45,7 +45,7 @@ export function BusNode({ selectedNode, onSelectNode }: BusNodeProps) {
         className={styles.busSublabel}
         textAnchor="middle"
       >
-        pub / sub
+        stream events
       </text>
     </g>
   );

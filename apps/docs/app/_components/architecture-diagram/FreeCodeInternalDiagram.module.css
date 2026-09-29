@@ -185,6 +185,39 @@
   font-family: monospace;
 }
 
+/* Conversation state and the diagnostic record produced as it runs. */
+.nodeBoxSession {
+  fill: rgba(15, 23, 42, 0.88);
+  stroke: rgba(148, 163, 184, 0.5);
+  stroke-width: 1.5;
+  transition: all 0.3s ease;
+}
+
+.nodeGroup:hover .nodeBoxSession {
+  stroke: rgba(226, 232, 240, 0.9);
+  fill: rgba(30, 41, 59, 0.94);
+}
+
+.sessionHeader {
+  fill: #e2e8f0;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+  font-family: monospace;
+}
+
+.sessionText {
+  fill: rgba(255, 255, 255, 0.85);
+  font-size: 9px;
+  font-family: monospace;
+}
+
+.sessionSubtext {
+  fill: rgba(203, 213, 225, 0.65);
+  font-size: 7px;
+  font-family: monospace;
+}
+
 /* Agent Loop Box */
 .nodeBoxAgent {
   fill: rgba(30, 16, 8, 0.85);

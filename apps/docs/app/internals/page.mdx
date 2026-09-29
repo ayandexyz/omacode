@@ -34,6 +34,11 @@ headlessly — in CI, `freecode eval`, or a script — with no UI code loaded. T
 separate `apps/web` project is FreeCode's public website, not this coding
 client. See [IPC protocol](/internals/ipc) for the wire format.
 
+One distinction is worth keeping in mind as you read the diagram: a **session**
+is the current conversation and its diagnostic event log; **memory** is a small
+set of useful facts that can survive into a later session. They solve different
+problems, so the diagram keeps them separate.
+
 ## Where each subsystem lives
 
 Everything under this section maps to a directory in `apps/core/src/`:
