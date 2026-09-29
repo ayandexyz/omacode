@@ -102,3 +102,64 @@ export function deleteAnthropicOAuth(file: string = AUTH_FILE): boolean {
   fs.chmodSync(file, 0o600);
   return true;
 }
+
+/** A ChatGPT login for the `openai` provider (spec `2026-09-29-openai-codex-oauth-provider.md`). */
+export interface StoredOpenAIOAuth {
+  type: "oauth";
+  access_token: string;
+  refresh_token: string;
+  /** ms since epoch. */
+  expires_at: number;
+  /** The `chatgpt-account-id` header value. */
+  account_id: string;
+}
+
+export function readOpenAIOAuth(
+  file: string = AUTH_FILE,
+): StoredOpenAIOAuth | undefined {
+  const entry = readAuthFile(file)["openai"] as
+    | Partial<StoredOpenAIOAuth>
+    | undefined;
+  if (
+    entry &&
+    entry.type === "oauth" &&
+    typeof entry.access_token === "string" &&
+    typeof entry.refresh_token === "string" &&
+    typeof entry.expires_at === "number" &&
+    typeof entry.account_id === "string"
+  ) {
+    return {
+      type: "oauth",
+      access_token: entry.access_token,
+      refresh_token: entry.refresh_token,
+      expires_at: entry.expires_at,
+      account_id: entry.account_id,
+    };
+  }
+  return undefined;
+}
+
+export function saveOpenAIOAuth(
+  tokens: StoredOpenAIOAuth,
+  file: string = AUTH_FILE,
+): void {
+  const dir = path.dirname(file);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const all = readAuthFile(file);
+  all["openai"] = tokens;
+  fs.writeFileSync(file, JSON.stringify(all, null, 2), { mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+}
+
+export function hasStoredOpenAIOAuth(file: string = AUTH_FILE): boolean {
+  return readOpenAIOAuth(file) !== undefined;
+}
+
+export function deleteOpenAIOAuth(file: string = AUTH_FILE): boolean {
+  const all = readAuthFile(file);
+  if (!("openai" in all)) return false;
+  delete all["openai"];
+  fs.writeFileSync(file, JSON.stringify(all, null, 2), { mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+  return true;
+}

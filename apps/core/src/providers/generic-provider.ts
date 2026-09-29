@@ -8,13 +8,19 @@ import {
   ProviderChunk,
   ProviderInfo,
 } from "./types.js";
-import { getApiKey, anthropicAuthMode, hasConfiguredKey } from "./config.js";
+import {
+  getApiKey,
+  anthropicAuthMode,
+  hasConfiguredKey,
+  openaiAuthMode,
+} from "./config.js";
 import { createTimeoutFetch } from "./fetch-timeout.js";
 import {
   anthropicOAuthForbidden,
   createAnthropicOAuthFetch,
   withClaudeCodeIdentity,
 } from "./anthropic-oauth.js";
+import { createOpenAIOAuthFetch } from "./openai-oauth.js";
 import {
   convertToCoreMessages,
   buildAnthropicSystemParam,
@@ -60,6 +66,16 @@ function usesAnthropicOAuth(entry: ProviderCatalogueEntry): boolean {
   // the system param agree: retrying with a key while still prepending the
   // Claude Code identity block would break the §0.1 invariant.
   return anthropicOAuthForbidden() === undefined;
+}
+
+/**
+ * Whether the `openai` entry is served by a ChatGPT subscription through the
+ * Codex backend (spec `2026-09-29-openai-codex-oauth-provider.md`). Keyed on
+ * the provider id like the Anthropic check: other `@ai-sdk/openai` users have
+ * nothing to do with it.
+ */
+function usesOpenAIOAuth(entry: ProviderCatalogueEntry): boolean {
+  return entry.id === "openai" && openaiAuthMode() === "oauth";
 }
 
 /**
@@ -155,6 +171,16 @@ export function buildGenerateOptions(
         openai: { promptCacheKey: opts.sessionId },
       };
     }
+    if (usesOpenAIOAuth(entry)) {
+      // The Codex backend is stateless: with `store: false` the SDK sends full
+      // items (encrypted reasoning included) instead of `item_reference`s the
+      // backend could never resolve. The fetch wrapper enforces the same.
+      const openai = generateOptions.providerOptions?.openai ?? {};
+      generateOptions.providerOptions = {
+        ...generateOptions.providerOptions,
+        openai: { ...openai, store: false },
+      };
+    }
   }
 
   if (entry.effortFamily) {
@@ -226,17 +252,21 @@ export function createGenericProvider(entry: ProviderCatalogueEntry): AIProvider
           // Auth mode is read once, when the SDK is first built — flipping
           // authMode mid-process needs a restart, same as changing a key.
           const oauth = usesAnthropicOAuth(entry);
+          const openaiOAuth = usesOpenAIOAuth(entry);
           return factory({
-            // On the OAuth path the placeholder only satisfies the SDK
-            // constructor; the fetch wrapper deletes its x-api-key header and
-            // substitutes bearer auth on every request.
-            apiKey: oauth
-              ? "oauth-subscription"
-              : getApiKey(entry.id, entry.envKeys),
+            // On the OAuth paths the placeholder only satisfies the SDK
+            // constructor; the fetch wrapper replaces it with bearer auth on
+            // every request.
+            apiKey:
+              oauth || openaiOAuth
+                ? "oauth-subscription"
+                : getApiKey(entry.id, entry.envKeys),
             baseURL: baseURLFor(entry),
             fetch: oauth
               ? createAnthropicOAuthFetch(createTimeoutFetch())
-              : createTimeoutFetch(),
+              : openaiOAuth
+                ? createOpenAIOAuthFetch(createTimeoutFetch())
+                : createTimeoutFetch(),
             // Only @ai-sdk/openai-compatible requires this; the rest ignore it.
             name: entry.id,
           });

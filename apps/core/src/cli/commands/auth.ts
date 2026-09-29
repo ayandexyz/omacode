@@ -1,8 +1,9 @@
 // =============================================================================
 // `freecode auth login|status|logout` — Phase 1 of the Anthropic OAuth spec
-// (`docs/specs/2026-09-05-anthropic-oauth-provider.md`).
+// (`docs/specs/2026-09-05-anthropic-oauth-provider.md`), and the OpenAI/Codex
+// login (`docs/specs/2026-09-29-openai-codex-oauth-provider.md`).
 //
-// Presentation only: the protocol lives in `providers/anthropic-oauth*.ts`.
+// Presentation only: the protocol lives in `providers/{anthropic,openai}-oauth*.ts`.
 // Login prints the §0.1 disclosure once, per that spec — this feature
 // impersonates Claude Code against the user's own account and says so.
 // =============================================================================
@@ -12,13 +13,23 @@ import * as readline from "readline";
 import { spawn } from "child_process";
 import {
   anthropicAuthMode,
-  setAnthropicAuthMode,
+  openaiAuthMode,
+  setProviderAuthMode,
 } from "../../providers/config.js";
 import {
   deleteAnthropicOAuth,
+  deleteOpenAIOAuth,
   hasImportableClaudeCodeLogin,
   readAnthropicOAuth,
+  readOpenAIOAuth,
 } from "../../providers/auth-store.js";
+import {
+  buildOpenAIAuthorizeUrl,
+  exchangeOpenAICode,
+  generateOpenAIState,
+  OPENAI_REDIRECT_URI,
+} from "../../providers/openai-oauth-login.js";
+import { OPENAI_OAUTH } from "../../providers/openai-oauth.js";
 import {
   buildAuthorizeUrl,
   exchangeAnthropicCode,
@@ -41,6 +52,17 @@ subscription inference for its official surfaces, so this is against the spirit
 The account at risk is yours.
 
 Your API-key setup is untouched: run \`freecode auth logout anthropic\` to go back.
+`;
+
+const OPENAI_DISCLOSURE = `
+This logs in with your ChatGPT Plus/Pro subscription instead of an API key.
+
+To reach subscription inference, freecode uses the Codex CLI's OAuth client id
+and sends requests to the Codex backend as \`codex_cli_rs\` — it presents itself
+to OpenAI as the Codex CLI. Using a subscription through a third-party client is
+outside what OpenAI documents. The account at risk is yours.
+
+Your API-key setup is untouched: run \`freecode auth logout openai\` to go back.
 `;
 
 function prompt(question: string): Promise<string> {
@@ -73,10 +95,10 @@ function openBrowser(url: string): boolean {
   }
 }
 
-function assertAnthropic(provider: string): void {
-  if (provider !== "anthropic") {
+function assertOAuthProvider(provider: string): void {
+  if (provider !== "anthropic" && provider !== "openai") {
     throw new Error(
-      `Only "anthropic" supports OAuth login today (got "${provider}").`,
+      `Only "anthropic" and "openai" support OAuth login (got "${provider}").`,
     );
   }
 }
@@ -102,7 +124,8 @@ const loginCommand: CommandModule<object, LoginArgs> = {
         describe: "open the authorize URL in a browser (--no-browser to skip)",
       }) as never,
   handler: async (argv) => {
-    assertAnthropic(argv.provider);
+    assertOAuthProvider(argv.provider);
+    if (argv.provider === "openai") return loginOpenAI(argv.browser);
     console.error(DISCLOSURE);
 
     const { verifier, challenge } = generatePkce();
@@ -165,15 +188,66 @@ const loginCommand: CommandModule<object, LoginArgs> = {
   },
 };
 
-function finishLogin(expiresAt: number): void {
+function finishLogin(expiresAt: number, provider = "anthropic"): void {
   // An explicit login is an explicit opt-in (spec §0.1), so pin the mode
   // rather than leaving it to the "no API key configured" fallback.
-  setAnthropicAuthMode("oauth");
+  setProviderAuthMode(provider, "oauth");
   console.error(
-    `\nLogged in. anthropic now uses your subscription; the token expires ${new Date(
+    `\nLogged in. ${provider} now uses your subscription; the token expires ${new Date(
       expiresAt,
     ).toLocaleString()} and refreshes automatically.`,
   );
+}
+
+/**
+ * The OpenAI flow differs from Anthropic's in one way that shapes this: the
+ * redirect is FIXED at localhost:1455, so there is no manual-callback page to
+ * fall back to. If the port is busy (the Codex CLI mid-login), the browser
+ * still lands on that URL — it just fails to load — and the user pastes it.
+ */
+async function loginOpenAI(browser: boolean): Promise<void> {
+  console.error(OPENAI_DISCLOSURE);
+  const { verifier, challenge } = generatePkce();
+  const state = generateOpenAIState();
+  const authUrl = buildOpenAIAuthorizeUrl(challenge, state);
+  const server = await startCallbackServer({
+    port: OPENAI_OAUTH.callbackPort,
+    path: OPENAI_OAUTH.callbackPath,
+  });
+
+  console.error("Open this URL to authorize freecode:\n");
+  console.error(`  ${authUrl}\n`);
+  if (server && browser) openBrowser(authUrl);
+
+  try {
+    if (server && browser) {
+      console.error(
+        `Waiting up to ${CALLBACK_TIMEOUT_MS / 1000}s for the callback on ${OPENAI_REDIRECT_URI} ...`,
+      );
+      try {
+        const code = await server.waitForCode(state, CALLBACK_TIMEOUT_MS);
+        const tokens = await exchangeOpenAICode({ verifier, state, input: code });
+        finishLogin(tokens.expires_at, "openai");
+        return;
+      } catch (e) {
+        console.error(
+          `${e instanceof Error ? e.message : String(e)} Falling back to pasting the URL.\n`,
+        );
+      }
+    }
+    if (!server) {
+      console.error(
+        `Port ${OPENAI_OAUTH.callbackPort} is busy, so the browser will land on a page ` +
+          "that fails to load — that is expected. Copy its full URL from the address bar.\n",
+      );
+    }
+    const input = (await prompt("Paste the callback URL: ")).trim();
+    if (!input) throw new Error("No callback URL entered.");
+    const tokens = await exchangeOpenAICode({ verifier, state, input });
+    finishLogin(tokens.expires_at, "openai");
+  } finally {
+    server?.close();
+  }
 }
 
 const statusCommand: CommandModule = {
@@ -201,6 +275,19 @@ const statusCommand: CommandModule = {
     if (mode === "oauth" && !stored) {
       console.log("           run `freecode auth login anthropic`");
     }
+
+    const openaiMode = openaiAuthMode();
+    const openai = readOpenAIOAuth();
+    console.log(`openai     auth mode: ${openaiMode}`);
+    if (openai) {
+      const state = openai.expires_at > Date.now() ? "valid until" : "expired";
+      console.log(
+        `           oauth token: ${state} ${new Date(openai.expires_at).toLocaleString()} (refreshes automatically)`,
+      );
+    } else {
+      console.log("           oauth token: none stored");
+      if (openaiMode === "oauth") console.log("           run `freecode auth login openai`");
+    }
   },
 };
 
@@ -214,13 +301,14 @@ const logoutCommand: CommandModule<object, { provider: string }> = {
       describe: "provider to log out of",
     }) as never,
   handler: (argv) => {
-    assertAnthropic(argv.provider);
-    const removed = deleteAnthropicOAuth();
-    setAnthropicAuthMode(undefined);
+    assertOAuthProvider(argv.provider);
+    const removed =
+      argv.provider === "openai" ? deleteOpenAIOAuth() : deleteAnthropicOAuth();
+    setProviderAuthMode(argv.provider, undefined);
     console.log(
       removed
-        ? "Logged out of anthropic; auth mode reverts to your API key."
-        : "No stored anthropic OAuth credentials.",
+        ? `Logged out of ${argv.provider}; auth mode reverts to your API key.`
+        : `No stored ${argv.provider} OAuth credentials.`,
     );
   },
 };

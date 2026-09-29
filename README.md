@@ -64,6 +64,11 @@ freecode auth login anthropic
 > away. Full stance:
 > [Anthropic subscription login](https://freecode.website/getting-started/anthropic-subscription).
 
+Using a ChatGPT Plus/Pro subscription for `openai` instead of a key:
+`freecode auth login openai`. It logs in as the Codex CLI and talks to the Codex
+backend — same kind of trade, same opt-in, same `freecode auth logout openai`.
+Details: [OpenAI subscription login](https://freecode.website/getting-started/openai-subscription).
+
 Using a web session instead of a key at all: `/web` in the TUI lists
 **web-session providers** (`gemini-web` today). It calls the Gemini web client's
 own endpoint — anonymously by default; a cookie from a signed-in tab in

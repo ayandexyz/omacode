@@ -6,5 +6,6 @@ export default {
   quickstart: "Quickstart",
   providers: "Providers & API keys",
   "anthropic-subscription": "Anthropic subscription",
+  "openai-subscription": "OpenAI subscription",
   configuration: "Configuration"
 } satisfies MetaRecord;

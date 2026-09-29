@@ -226,22 +226,26 @@ function respond(res: http.ServerResponse, status: number, body: string): void {
 }
 
 /**
- * Localhost callback listener on an ephemeral port. Returns undefined when the
- * port cannot be bound (locked-down machine, container) — the caller then falls
- * back to the manual paste flow rather than failing the login.
+ * Localhost callback listener, on an ephemeral port unless the caller's OAuth
+ * client has a fixed redirect registered (OpenAI: 1455). Returns undefined
+ * when the port cannot be bound (locked-down machine, container, port taken) —
+ * the caller then falls back to the manual paste flow rather than failing the
+ * login.
  */
-export async function startCallbackServer(): Promise<CallbackServer | undefined> {
+export async function startCallbackServer(
+  opts: { port?: number; path?: string } = {},
+): Promise<CallbackServer | undefined> {
   const server = http.createServer();
   const bound = await new Promise<boolean>((resolve) => {
     server.once("error", () => resolve(false));
-    server.listen(0, "127.0.0.1", () => resolve(true));
+    server.listen(opts.port ?? 0, "127.0.0.1", () => resolve(true));
   });
   if (!bound) return undefined;
 
   const port = (server.address() as AddressInfo).port;
   return {
     port,
-    redirectUri: `http://localhost:${port}/callback`,
+    redirectUri: `http://localhost:${port}${opts.path ?? "/callback"}`,
     close: () => server.close(),
     waitForCode(expectedState, timeoutMs) {
       return new Promise<string>((resolve, reject) => {
@@ -265,7 +269,7 @@ export async function startCallbackServer(): Promise<CallbackServer | undefined>
           const error = url.searchParams.get("error");
           if (error) {
             respond(res, 400, "<h1>Login cancelled</h1>");
-            finish(new Error(`Anthropic returned an OAuth error: ${error}`));
+            finish(new Error(`The provider returned an OAuth error: ${error}`));
             return;
           }
           const code = url.searchParams.get("code");

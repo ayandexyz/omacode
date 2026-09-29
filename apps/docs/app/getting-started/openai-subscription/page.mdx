@@ -1,0 +1,74 @@
+---
+title: "OpenAI (ChatGPT) subscription login"
+description: "Use a ChatGPT Plus/Pro subscription for the openai provider instead of an API key — how it works, and the risk you take."
+---
+
+# OpenAI (ChatGPT) subscription login
+
+FreeCode can serve the `openai` provider from your ChatGPT Plus/Pro
+subscription (the allowance the Codex CLI uses) instead of a metered API key:
+
+```bash
+freecode auth login openai
+```
+
+## Before you turn this on
+
+Subscription inference lives at the Codex backend
+(`chatgpt.com/backend-api/codex`), not at `api.openai.com`. To reach it,
+FreeCode logs in with **the Codex CLI's OAuth client id** and sends requests as
+`originator: codex_cli_rs` — it presents itself to OpenAI as the Codex CLI.
+Unlike the [Anthropic login](/getting-started/anthropic-subscription), nothing
+is injected into your prompt.
+
+> Using a subscription through a third-party client is outside what OpenAI
+> documents. **The account at risk is yours.** If that trade is not worth it,
+> use an [API key](/getting-started/providers) — that path is unchanged.
+
+## Logging in
+
+1. `freecode auth login openai` prints an authorize URL and opens it.
+2. Sign in with your ChatGPT account. The browser returns to
+   `http://localhost:1455/auth/callback` and FreeCode stores the login in
+   `~/.freecode/auth.json` (mode 0600).
+3. If port 1455 is busy (a Codex CLI login in progress, or `--no-browser` on a
+   remote machine), the browser lands on a page that fails to load. That is
+   expected: copy its full URL from the address bar and paste it at the prompt.
+
+Then pick a model the subscription serves, e.g. `/model openai/gpt-5.5`. Any
+model id is passed through, so whatever your plan offers works.
+
+The token refreshes on its own. `freecode auth status` shows it;
+`freecode auth logout openai` deletes it and switches back to your API key.
+
+## How the mode is chosen
+
+| Order | Source |
+|---|---|
+| 1 | `FREECODE_OPENAI_AUTH=oauth` or `api-key` |
+| 2 | `providers.openai.authMode` in `~/.freecode/config.json` (login sets it, logout clears it) |
+| 3 | an API key, if one is configured |
+| 4 | the subscription, if a login is stored |
+
+A machine with an API key never switches to the subscription without being
+told to.
+
+## What differs from the API
+
+- Subscription calls are recorded with no dollar cost, since a subscription is
+  not billed per token.
+- The backend is stateless and streaming-only. FreeCode sends `store: false`
+  and removes `max_output_tokens` and `temperature`, which the backend refuses.
+  Non-streaming calls (title generation, memory extraction) are streamed and
+  put back together transparently.
+
+## Why FreeCode doesn't reuse your Codex CLI login
+
+OpenAI replaces the refresh token every time it is used. If two programs share
+one login, whichever refreshes second is logged out. So FreeCode never copies
+`~/.codex/auth.json` and always keeps its own login.
+
+## Known gaps
+
+- A spent usage window has not been observed yet, so it is unverified whether
+  [overnight runs](/guides/overnight-runs) recognise it and wait it out.

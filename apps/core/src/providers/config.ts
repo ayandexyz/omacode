@@ -6,7 +6,7 @@ import {
   envKeysFor as catalogueEnvKeys,
   resolveCatalogue,
 } from "./catalogue.js";
-import { hasStoredAnthropicOAuth } from "./auth-store.js";
+import { hasStoredAnthropicOAuth, hasStoredOpenAIOAuth } from "./auth-store.js";
 import { logger } from "../utils/logger.js";
 
 export const CONFIG_DIR = path.join(os.homedir(), ".freecode");
@@ -227,17 +227,10 @@ export function setLastAgentMode(mode: string): void {
 }
 
 export function hasApiKey(providerId: string): boolean {
-  // OAuth stands in for a key: provider listing must show anthropic as
+  // OAuth stands in for a key: provider listing must show anthropic/openai as
   // configured when a subscription login is on file, or the UI would demand a
   // key the request path will never read.
-  if (
-    providerId === "anthropic" &&
-    anthropicAuthMode() === "oauth" &&
-    hasStoredAnthropicOAuth()
-  ) {
-    return true;
-  }
-  return hasConfiguredKey(providerId);
+  return hasSubscriptionLogin(providerId) || hasConfiguredKey(providerId);
 }
 
 /**
@@ -254,7 +247,7 @@ export function hasConfiguredKey(providerId: string): boolean {
 
 /**
  * Provider ids with a credential on file: a stored `providers.*.apiKey`, a
- * catalogue env var set in the environment, or a stored Anthropic OAuth login.
+ * catalogue env var set in the environment, or a stored subscription login.
  * Sorted for a stable error message.
  */
 export function credentialedProviderIds(): string[] {
@@ -268,8 +261,8 @@ export function credentialedProviderIds(): string[] {
       ids.add(entry.id);
     }
   }
-  if (anthropicAuthMode() === "oauth" && hasStoredAnthropicOAuth()) {
-    ids.add("anthropic");
+  for (const id of Object.keys(SUBSCRIPTION_AUTH)) {
+    if (hasSubscriptionLogin(id)) ids.add(id);
   }
   return [...ids].sort();
 }
@@ -308,24 +301,53 @@ function normalizeAuthMode(value: string | undefined): AnthropicAuthMode | undef
 }
 
 /**
- * How the `anthropic` provider authenticates. Resolution:
- * `FREECODE_ANTHROPIC_AUTH` env pin → `providers.anthropic.authMode` in
- * config → default. The default is API-key whenever one exists — a machine
- * with a key never silently switches to the subscription — and falls back to
- * OAuth only when no key is configured but a login is already stored in
- * `~/.freecode/auth.json` (mirrors jcode's resolution, keeps zero-config
- * working after a login). Note import from Claude Code does NOT count here:
- * OAuth without an explicit opt-in requires freecode's own stored login.
+ * Providers with a subscription (OAuth) auth mode: the env pin that overrides
+ * config, and whether freecode's own login is on file.
  */
-export function anthropicAuthMode(): AnthropicAuthMode {
-  const pinned = normalizeAuthMode(process.env.FREECODE_ANTHROPIC_AUTH);
+const SUBSCRIPTION_AUTH: Record<
+  string,
+  { env: string; hasStoredLogin: () => boolean }
+> = {
+  anthropic: { env: "FREECODE_ANTHROPIC_AUTH", hasStoredLogin: () => hasStoredAnthropicOAuth() },
+  openai: { env: "FREECODE_OPENAI_AUTH", hasStoredLogin: () => hasStoredOpenAIOAuth() },
+};
+
+/**
+ * How a subscription-capable provider authenticates. Resolution: env pin
+ * (`FREECODE_ANTHROPIC_AUTH` / `FREECODE_OPENAI_AUTH`) →
+ * `providers.<id>.authMode` in config → default. The default is API-key
+ * whenever one exists — a machine with a key never silently switches to the
+ * subscription — and falls back to OAuth only when no key is configured but a
+ * login is already stored in `~/.freecode/auth.json` (mirrors jcode's
+ * resolution, keeps zero-config working after a login). Import from Claude
+ * Code does NOT count here: OAuth without an explicit opt-in requires
+ * freecode's own stored login. Any other provider is always "api-key".
+ */
+export function authModeFor(providerId: string): AnthropicAuthMode {
+  const spec = SUBSCRIPTION_AUTH[providerId];
+  if (!spec) return "api-key";
+  const pinned = normalizeAuthMode(process.env[spec.env]);
   if (pinned) return pinned;
   const configured = normalizeAuthMode(
-    readConfig().providers?.["anthropic"]?.authMode,
+    readConfig().providers?.[providerId]?.authMode,
   );
   if (configured) return configured;
-  if (hasConfiguredKey("anthropic")) return "api-key";
-  return hasStoredAnthropicOAuth() ? "oauth" : "api-key";
+  if (hasConfiguredKey(providerId)) return "api-key";
+  return spec.hasStoredLogin() ? "oauth" : "api-key";
+}
+
+export function anthropicAuthMode(): AnthropicAuthMode {
+  return authModeFor("anthropic");
+}
+
+export function openaiAuthMode(): AnthropicAuthMode {
+  return authModeFor("openai");
+}
+
+/** In OAuth mode with a login on file — the login stands in for a key. */
+function hasSubscriptionLogin(providerId: string): boolean {
+  const spec = SUBSCRIPTION_AUTH[providerId];
+  return Boolean(spec) && authModeFor(providerId) === "oauth" && spec!.hasStoredLogin();
 }
 
 export function setApiKey(
@@ -384,17 +406,21 @@ export function setWebCredential(
 }
 
 /**
- * Pin (or, with undefined, un-pin) how `anthropic` authenticates. Written by
- * `freecode auth login/logout` — an explicit login is one of the two opt-ins
- * §0.1 of the OAuth spec allows, and an explicit logout takes it back.
+ * Pin (or, with undefined, un-pin) how `anthropic` / `openai` authenticates.
+ * Written by `freecode auth login/logout` — an explicit login is one of the
+ * two opt-ins §0.1 of the OAuth spec allows, and an explicit logout takes it
+ * back.
  */
-export function setAnthropicAuthMode(mode: AnthropicAuthMode | undefined): void {
+export function setProviderAuthMode(
+  providerId: string,
+  mode: AnthropicAuthMode | undefined,
+): void {
   const config = readConfig();
   if (!config.providers) config.providers = {};
-  const entry = config.providers["anthropic"] ?? {};
+  const entry = config.providers[providerId] ?? {};
   if (mode) entry.authMode = mode;
   else delete entry.authMode;
-  config.providers["anthropic"] = entry;
+  config.providers[providerId] = entry;
   writeConfig(config);
 }
 
@@ -404,9 +430,7 @@ export function setAnthropicAuthMode(mode: AnthropicAuthMode | undefined): void 
  * call never depends on how the machine reading the log is configured.
  */
 export function subscriptionAuth(providerId: string): "oauth" | undefined {
-  return providerId === "anthropic" && anthropicAuthMode() === "oauth"
-    ? "oauth"
-    : undefined;
+  return authModeFor(providerId) === "oauth" ? "oauth" : undefined;
 }
 
 /**

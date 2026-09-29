@@ -76,6 +76,17 @@ build that auto-poke kept alive. `explicit-question-tool-once` covers only
 the refusal half. Fix: an optional per-case scripted answer (e.g.
 `answers: ["Just exploring"]`) the runner replies with instead of rejecting.
 
+### OpenAI subscription usage limits are unverified as a quota error (found 2026-09-29)
+
+A spent ChatGPT usage window on the `openai` OAuth path (Codex backend) has
+never been observed. `isQuotaExhaustedError` matches 429/402 bodies by message
+pattern (`QUOTA_EXHAUSTED_PATTERNS`), so it may or may not catch it. If it
+doesn't, it is retried as an ordinary rate limit, and `freecode night` never
+learns the reset time. Capture one real response, then add a pattern or a
+header prefix to `RATE_LIMIT_HEADER_PREFIXES` so it waits the window out. Spec
+`2026-09-29-openai-codex-oauth-provider.md` §5 Q2; docs page
+`getting-started/openai-subscription` Known gaps.
+
 ### Settled background shells are retained until dismissed (added 2026-09-08)
 
 **Status:** known, bounded, low priority.
