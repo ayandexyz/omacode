@@ -324,7 +324,7 @@ The page publishes, non-negotiably:
 | **2** | **5 instances × 3 trials × 2 agents** → first `report.json` | intersection cost computed, spread reported |
 | **3** | Codex + OpenCode adapters; 10 instances | table matches the prior art's shape |
 | **4** | `/benchmarks` page + artifact bundle | a stranger can re-run it from the README |
-| **5** | Held-out set from this repo's own commits (§10.2) | published next to, never instead of, the external number |
+| **5** | Held-out set from this repo's own commits (§10.2) — designed in `2026-09-29-commit-reconstruction-bench.md` (BuffBench method, two-judge panel; overrides §6.5 for that set only) | published next to, never instead of, the external number |
 
 Phase 2 is the honest stopping point if the results are uninteresting. Phase 4 is a public
 commitment and should not be started until Phase 2's numbers have been looked at.

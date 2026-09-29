@@ -1,0 +1,8 @@
+{
+  // The e2e suite lives outside src/ (so the unit glob and its CI baseline
+  // never see it), which puts it outside the main tsconfig's rootDir. This
+  // brings it back under `check-types`.
+  "extends": "../tsconfig.json",
+  "compilerOptions": { "rootDir": ".", "noEmit": true },
+  "include": ["**/*.ts"]
+}

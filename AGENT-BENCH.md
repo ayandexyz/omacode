@@ -23,6 +23,7 @@ This is **not** `pnpm bench:memory`. That measures PSS and time-to-first-frame
 | Did my last change make *our* agent worse? | `pnpm eval` | `EVAL.md` |
 | How much RAM, how fast to first frame? | `pnpm bench:memory` | `Benchmark.md` |
 | **Does it fix real bugs vs Claude Code / OpenCode, and for how much?** | **`pnpm bench:agents`** | **this file** |
+| Can it rebuild real feature commits from *this* repo, judged BuffBench-style? | `pnpm bench:commits` → `bench:tasks` → `bench:agents --set freecode-commits` → `bench:judge` | this file, §3d |
 
 **Status (2026-09-06).** The full pipeline exists and is proven end to end
 on freecode vs claude-code: metering (on by default), container isolation
@@ -283,6 +284,136 @@ pinned), so the published checksum is a claim anyone can re-derive. Publish
 the tarball wherever the numbers go; the proxy log carries no headers or
 bodies, so nothing in it needs redacting.
 
+## 3d. The judged set — this repo's own commits (Phase 5, partly built)
+
+Spec: `docs/specs/2026-09-29-commit-reconstruction-bench.md`. BuffBench's method
+(freebuff, Apache-2.0) on our commits: real commits in `apps/core` / `apps/tui`,
+an LLM-written user prompt per commit, and a **two-judge panel** scoring each
+agent's diff against the real one (completion / code quality / overall, 0–10).
+This set is reported **beside** the SWE-bench number, never instead of it.
+
+**Status (2026-09-29).**
+
+| Piece | Command | State |
+| --- | --- | --- |
+| Candidate commits (BuffBench's `basicFilter` + app scope) | `pnpm bench:commits` | built, free |
+| HARD screen + task generator (GPT-5.5 via `codex exec`) | `pnpm bench:tasks generate` | built; pilot made 10 drafts |
+| Owner review | `pnpm bench:tasks list` / `approve` | built |
+| Judging: Gemini scores, GPT audits 20% + fallback (default); full panel optional | `runner/judge-audit.ts`, `runner/judge.ts` | built; panel live-tested |
+| Trials on judged tasks (setup, 60-min timeout, final checks) | `pnpm bench:agents --set freecode-commits [--isolate]` | built |
+| Judging step + BuffBench's metrics | `pnpm bench:judge` | built; smoke-tested (real diff 10.0, empty 0.0) |
+| In-container install + checks for `--isolate` | (part of `bench:agents`) | built, unit-tested; **not yet run live** (needs the `docker` group and a rebuilt image) |
+
+```bash
+# 0. Once per pinned model: its public release date + source, in
+#    bench/agent-bench/instances/model-releases.json. Unknown fails the check.
+# 1. Candidates. --since is REQUIRED and must be AFTER every pinned model's
+#    release. The repo is public since its first commit, so this window is the
+#    only contamination control (spec §4.8). The window is saved with the
+#    candidates and follows the tasks into the draft and approved files. Free.
+pnpm bench:commits --since <YYYY-MM-DD> --out bench/agent-bench/.cache/candidates.json
+
+# 2. Screen + generate. Resumable: verdicts cache in .cache/screen.json, drafted
+#    shas are skipped, a failed call is retried next run. Screen only what the task
+#    target needs: the screen keeps ~60% here, so --limit 40 yields ~20 tasks.
+pnpm bench:tasks generate --candidates bench/agent-bench/.cache/candidates.json --limit 40
+
+# 3. Review. Edit `prompt` in instances/freecode-commits.draft.json if needed, then:
+pnpm bench:tasks list
+pnpm bench:tasks approve --by <you> <id|short-sha>...    # or --all
+```
+
+```bash
+# 4. Trials (paid agent turns; each task gets up to 60 minutes). --isolate needs an
+#    image with pnpm in it: rebuild once with `pnpm bench:image` (online).
+pnpm bench:agents --set freecode-commits --trials 3 --isolate [--instances add-x,fix-y]
+
+# 5. Judge (resumable; --rejudge to redo, --panel for both judges on every trial)
+pnpm bench:judge bench/agent-bench/results/<run>
+```
+
+Only `approve` writes `instances/freecode-commits.json`, the file the runner
+reads. Every record there carries `promptReview.by`, and the loader refuses one
+that does not. A trial clones the local repo at the parent commit, runs
+`pnpm install --frozen-lockfile --prefer-offline`, runs the agent, takes the
+patch, then runs the task's typecheck and tests (last 20K characters of output
+kept, `final-checks.json`). A judged run is not published to `/benchmark`.
+
+**With `--isolate`, the install and the checks run inside the agent's image**,
+because this repo's native modules (tree-sitter, sharp, onnxruntime) must be
+built for the image's Node, not your host's. The install goes on the egress
+network into a pnpm store at `.cache/pnpm-store`, a plain directory you own (a
+docker volume would be root-owned). The checks run with `--network none`.
+Without `--isolate` both run on the host and the run is unpublishable.
+
+**Contamination check (spec §4.8).** Before any spend, a judged run checks
+that every agent's pinned model was released *before* the window's first day,
+using `instances/model-releases.json`. A failure stops the run.
+`--contamination-unchecked` runs anyway for smoke tests; the report records the
+problems and can never be publishable. Tasks from two windows are refused in
+one file.
+
+`bench:judge` writes `judging.json` per trial and `judged-report.json` per run,
+and prints BuffBench's table (avg, avg excluding scores of 1.0 or below, $/run,
+minutes per run), per-app and co-author columns, cost on tasks both agents solved
+(≥7.5), wide trial spreads, saturated tasks, and audit and fallback counts. Its
+first line is the verdict: *scored by Gemini, audited by GPT*, or audit
+**UNMEASURED** or **FAILED**, which means a published number needs `--panel`.
+`publishable` is true only for an isolated run with verified judging (audit
+passed, or full panel with ≤10% of trials scored by fewer than two judges) and
+a passed contamination check.
+
+**Prerequisites.**
+- `codex` CLI installed and logged in (`codex login`). Screen, generator and
+  the GPT judge all run `codex exec -m gpt-5.5` on that login.
+- A Gemini key in `~/.freecode/config.json` for the Gemini judge.
+- Neither judge may share a model family with the agents' pinned model:
+  `assertNoCollision` refuses MiniMax judges while agents run MiniMax-M3, and
+  would refuse the GPT judge if agents were pinned to an OpenAI model.
+
+**Judging is audit mode by default.** Gemini scores every trial. GPT re-judges a
+fixed 20% sample (`sha256(task|agent|trial)`, the same trials on every re-judge)
+and scores a trial only when Gemini fails. The score is never a mean. A run
+reads as "scored by Gemini, audited by GPT" only with ≥5 two-sided audits and a
+mean gap ≤ 1.5 points. Otherwise a published number needs the full panel.
+
+**Cost (Codex subscription tokens, not dollars).** Measured on the pilot:
+~45K input per screened commit, ~200K per generated task (the generator
+explores a checkout), and ~118K per GPT judge call (median; mostly context
+files). A 20-task Phase 2 in audit mode is ~9M: ~2M screen (`--limit 40`),
+~4M generate, ~3M audit. The full panel would add ~11M, and screening every
+candidate ~22M more. The ~10K-token Codex preamble on every call cannot be
+turned off.
+
+**Gotchas, all measured.**
+- **Your own Codex setup is kept out.** Every call passes
+  `--ignore-user-config --ignore-rules` and disables hooks, plugins, apps,
+  multi-agent, browser, computer-use and skill search. Before that, a judge call
+  fired your SessionEnd hook.
+- **Messages go through stdin, never argv.** Linux caps one argument at 128KB.
+  2 of 6 early screens died with `spawn E2BIG`.
+- **The screen barely filters this repo.** It kept 10 of 16 in the pilot, and 7
+  of those came from two feature series. Our commits are phase-sized, so "HARD"
+  is the default.
+- **The image needs pnpm.** Images built before the judged set lack it, and an
+  isolated judged run refuses them with the rebuild command.
+- **You must be in the `docker` group** (`sudo usermod -aG docker $USER`, then
+  log in again), or every docker call fails with "permission denied".
+- **Gemini is retried twice before GPT takes over.** The first live smoke
+  fell back on both trials over a transient "high demand" error, and every
+  fallback puts GPT's scale into a Gemini-scored run.
+- **Model ids come in two dialects.** The claude-code adapter says `MiniMax-M3`
+  with no provider prefix, so the judge family check reads model names, not
+  just prefixes.
+- **Wrong-scale verdicts are rejected.** A judge that answers 0–1 (GPT-5.5 gave
+  0.88 once) counts as dead, not as 0.88/10.
+- **Gemini is Flash, not Pro.** This key has no Pro quota
+  (`gemini-3.1-pro-preview`), and the older Pro models are retired. Upgrading
+  the key is the first judge improvement.
+- **Sonnet via the Claude subscription was refused** ("OAuth authentication is
+  currently not allowed for this organization"). That is why the panel is Gemini
+  + GPT and not BuffBench's GPT + Sonnet.
+
 ---
 
 ## 4. Artifacts and `/benchmark`
@@ -416,7 +547,11 @@ checking, which once let a field vanish from `TrialRecord` unnoticed), then
 runs every `*.test.ts`: proxy parse/merge (both wire conventions), rate card,
 pass-through (no retry on 500), leak audit, env overlays, docker argv
 construction (secrets never in argv), grader prediction/verdict folding, and
-bundle reproducibility. Catches a broken meter without spending a cent. Run
+bundle reproducibility; for the judged set, commit filtering, the screen and
+generator inputs, task approval, the judge panel's arithmetic (mean,
+median-judge analysis, one dead, both dead, wrong scale, family collision) and
+the `codex exec` transport against a fake `codex` (argv, stdin over 128KB,
+abort). Catches a broken meter without spending a cent. Run
 it before you ever pay for a matrix.
 
 `apps/core` also covers `MINIMAX_BASE_URL` in `catalogue.test.ts`.
@@ -434,6 +569,8 @@ it before you ever pay for a matrix.
 | Grade or re-grade a finished run | `pnpm bench:grade results/<run> --publish` | free (no model) |
 | Re-show an old run on `/benchmark` | `tsx bench/agent-bench/runner/publish.ts results/<run>` | free |
 | Meaning of a number changed | same, with `--fresh` | free |
+| How many commits could become judged tasks? | `pnpm bench:commits --since <date>` | free |
+| Draft judged tasks from new commits | `pnpm bench:tasks generate --candidates … --limit N` | Codex subscription: ~45K tokens/screen, ~200K/task |
 
 **Never in normal CI.** This spends real money in (eventually) Docker and is a
 release-cadence or on-demand job. The moment it exits non-zero somebody wires
@@ -471,12 +608,14 @@ bench/agent-bench/
   tsconfig.json             # test:agent-bench typechecks before it tests
   agents/*.json             # one adapter per agent
   instances/django-lite.txt # the ten ids
+  instances/freecode-commits.draft.json  # judged-set drafts awaiting review
+  instances/freecode-commits.json        # approved judged tasks (runner reads this)
   runner/                   # trial loop, fetch, publish, workspace, grade, bundle
   proxy/                    # recording meter (spec §6.4)
   isolate/                  # Dockerfile + container/network plumbing (§6.3)
   .cache/opencode-config/   # opencode's pre-installed plugin deps (seed, git-ignored)
   results/<date>/           # git-ignored
-  .cache/                   # git-ignored
+  .cache/                   # git-ignored (incl. screen.json, candidates*.json)
 
 apps/web/app/benchmark/page.tsx
 apps/web/app/data/benchmarks/<matchup>.json
@@ -487,6 +626,7 @@ apps/web/app/data/benchmarks/<matchup>.json
 ## Environment
 
 ```bash
+# Judged set (§3d): a Gemini key in ~/.freecode/config.json, and `codex login`.
 MINIMAX_API_KEY=...          # required for every shipped adapter
 MINIMAX_BASE_URL=...         # injected by the runner; do not set by hand unless debugging
 ANTHROPIC_BASE_URL=...       # same; Claude Code. An operator export of ANTHROPIC_API_KEY

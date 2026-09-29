@@ -13,7 +13,10 @@
 import * as fs from "fs";
 import * as path from "path";
 import { agentVersion, loadAgent, runAgent } from "./agents.js";
-import { loadInstances, readIdList } from "./instances.js";
+import { CACHE_DIR, loadInstances, readIdList } from "./instances.js";
+import { checkContamination, readReleases } from "./contamination.js";
+import { loadJudgedInstances, loadJudgedWindow } from "./judged-instances.js";
+import { JUDGED_TIMEOUT_MS, runFinalChecks, runSetup, type InContainer } from "./judged-trial.js";
 import { publish } from "./publish.js";
 import { taskPrompt } from "./prompt.js";
 import { createWorkspace, extractPatch, verifyWorkspace } from "./workspace.js";
@@ -24,6 +27,7 @@ import {
   ensureNetworks,
   forwardedEnvNames,
   imageExists,
+  imageHasPnpm,
   startProxyContainer,
 } from "../isolate/docker.js";
 import { meterEnv, upstreamFor } from "../proxy/env.js";
@@ -41,10 +45,19 @@ function arg(name: string, fallback?: string): string | undefined {
 
 const agentIds = (arg("agents", "freecode,claude-code") as string).split(",");
 const trials = Number(arg("trials", "1"));
-const timeoutMs = Number(arg("timeout", "900000"));
-const instanceIds = arg("instances")
-  ? (arg("instances") as string).split(",")
-  : readIdList(path.join(ROOT, "instances", "django-lite.txt"));
+// `--set freecode-commits` runs the judged set (spec 2026-09-29-commit-
+// reconstruction-bench.md): approved tasks from this repo's own commits,
+// scored afterwards by `pnpm bench:judge`, not by the SWE-bench grader.
+const set = arg("set", "swe-bench-lite") as Report["set"];
+if (set !== "swe-bench-lite" && set !== "freecode-commits") {
+  throw new Error(`--set must be swe-bench-lite or freecode-commits, not ${set}`);
+}
+const judged = set === "freecode-commits";
+// Theirs: 60 minutes for a judged task, which is feature-sized, not a bug fix.
+const timeoutMs = Number(arg("timeout", String(judged ? JUDGED_TIMEOUT_MS : 900000)));
+const requestedIds = arg("instances")?.split(",");
+/** The containers' pnpm store (spec §4.7): operator-owned, shared by every trial. */
+const PNPM_STORE_DIR = path.join(CACHE_DIR, "pnpm-store");
 const runId = new Date().toISOString().replace(/[:.]/g, "-");
 const outDir = arg("out", path.join(ROOT, "results", runId)) as string;
 const meter = !process.argv.includes("--no-meter");
@@ -64,13 +77,35 @@ async function main() {
       );
     }
     ensureNetworks();
+    if (judged) fs.mkdirSync(PNPM_STORE_DIR, { recursive: true });
+    if (judged && !imageHasPnpm(IMAGE)) {
+      // Images built before the judged set carry no pnpm; every setup would fail.
+      throw new Error(`the "${IMAGE}" image has no pnpm; rebuild it (online): pnpm bench:image`);
+    }
   }
 
   const agents = agentIds.map((id) => loadAgent(id));
+  // Spec §4.8, before any spend: every pinned model must predate the tasks.
+  const contamination = judged
+    ? checkContamination(loadJudgedWindow(), readReleases(), agents.map((a) => a.model))
+    : undefined;
+  if (contamination && !contamination.ok) {
+    const detail = contamination.problems.map((p) => `  - ${p}`).join("\n");
+    if (!process.argv.includes("--contamination-unchecked")) {
+      throw new Error(
+        `contamination check failed:\n${detail}\n` +
+          `Fix instances/model-releases.json or the window, or pass --contamination-unchecked ` +
+          `for a smoke run (the report is then unpublishable).`,
+      );
+    }
+    console.warn(`contamination check FAILED, continuing unchecked (unpublishable):\n${detail}`);
+  }
   const versions = new Map(
     agents.map((a) => [a.id, agentVersion(a, isolate ? IMAGE : undefined)]),
   );
-  const instances = await loadInstances(instanceIds);
+  const instances = judged
+    ? loadJudgedInstances(requestedIds)
+    : await loadInstances(requestedIds ?? readIdList(path.join(ROOT, "instances", "django-lite.txt")));
 
   fs.mkdirSync(outDir, { recursive: true });
   console.log(`run ${runId}`);
@@ -115,6 +150,20 @@ async function main() {
           if (!verifyWorkspace(ws.dir, inst.baseCommit)) {
             throw new Error(`checkout is not at ${inst.baseCommit}`);
           }
+          // Isolated: setup and checks run in the agent's image (spec §4.7).
+          const inContainer: InContainer | undefined = isolate
+            ? {
+                tool: {
+                  image: IMAGE,
+                  name: `bench-setup-${safe}`.slice(0, 60),
+                  wsDir: ws.dir,
+                  uid: process.getuid?.() ?? 1000,
+                  gid: process.getgid?.() ?? 1000,
+                },
+                storeDir: PNPM_STORE_DIR,
+              }
+            : undefined;
+          if (inst.initCommand) runSetup(inst.initCommand, ws.dir, inContainer);
           const prompt = taskPrompt(inst);
           fs.writeFileSync(path.join(artifactDir, "prompt.txt"), prompt);
 
@@ -170,6 +219,20 @@ async function main() {
 
           const patch = extractPatch(ws.dir);
           fs.writeFileSync(path.join(artifactDir, "patch.diff"), patch.diff);
+          // After the patch is taken, so nothing the checks write can land in it.
+          const checks = inst.finalCheckCommands?.length
+            ? runFinalChecks(
+                inst.finalCheckCommands,
+                ws.dir,
+                inContainer && {
+                  ...inContainer,
+                  tool: { ...inContainer.tool, name: `bench-check-${safe}`.slice(0, 58) },
+                },
+              )
+            : undefined;
+          if (checks) {
+            fs.writeFileSync(path.join(artifactDir, "final-checks.json"), JSON.stringify(checks, null, 2));
+          }
           const usage = proxyOrigin ? persistTrialMeter(artifactDir, spec.model) : undefined;
 
           record = {
@@ -199,6 +262,7 @@ async function main() {
             cacheWriteTokens: usage?.cacheWriteTokens,
             usd: usage ? (usage.usd ?? null) : undefined,
             auditOk: usage?.auditOk,
+            finalChecks: checks?.map((c) => ({ command: c.command, exitCode: c.exitCode })),
           };
         } catch (err) {
           // One dead trial must not cost the rest of the matrix.
@@ -240,6 +304,17 @@ async function main() {
   }
 
   const report: Report = {
+    set,
+    ...(contamination
+      ? {
+          contamination: {
+            checked: contamination.ok,
+            window: contamination.window,
+            releases: contamination.releases,
+            problems: contamination.problems,
+          },
+        }
+      : {}),
     startedAt: runId,
     finishedAt: new Date().toISOString(),
     isolation: isolate ? "container" : "none",
@@ -254,7 +329,13 @@ async function main() {
   // freecode+opencode followed by one of freecode+claude-code leaves all three
   // on the page, where it used to silently drop the agent missing from the
   // latest run. `--fresh` starts over.
-  console.log(path.relative(process.cwd(), publish(report, process.argv.includes("--fresh"))));
+  // The /benchmark page is the SWE-bench matchup. A judged run has no
+  // resolved/unresolved verdict to show there until `bench:judge` scores it.
+  if (judged) {
+    console.log(`next: pnpm bench:judge ${path.relative(process.cwd(), outDir)}`);
+  } else {
+    console.log(path.relative(process.cwd(), publish(report, process.argv.includes("--fresh"))));
+  }
 
   // Phase 0 has no grader, so "did every adapter produce a patch" IS the
   // verdict. Non-zero on a broken adapter, because a silently empty patch is

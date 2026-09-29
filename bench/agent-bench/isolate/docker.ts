@@ -75,6 +75,70 @@ export function dockerArgv(c: Containerize, argv: string[]): string[] {
   ];
 }
 
+/**
+ * A judged trial's setup and final checks (spec 2026-09-29-commit-reconstruction-
+ * bench.md §4.7). They run in the SAME image as the agent: this repo has native
+ * modules (tree-sitter, sharp, onnxruntime) that must be built for the
+ * container's Node, not the host's, or the agent's own test runs and the final
+ * checks fail at import time.
+ */
+export interface ToolContainer {
+  image: string;
+  /** Unique, so a timeout can `docker rm -f` exactly this one. */
+  name: string;
+  wsDir: string;
+  uid: number;
+  gid: number;
+}
+
+/** Where the host's container-side pnpm store is mounted. */
+export const PNPM_STORE_MOUNT = "/pnpm-store";
+
+/**
+ * Setup: on the egress network, because install scripts may fetch prebuilt
+ * binaries (sharp does). The store is a host dir owned by the operator, not a
+ * named volume: docker creates volumes root-owned, and the install runs as
+ * the operator's uid. Shared by every trial — pnpm's store is
+ * content-addressed, so one store serves every lockfile.
+ */
+export function setupArgv(c: ToolContainer, storeDir: string, command: string): string[] {
+  return [
+    "docker", "run", "--rm", "--init",
+    "--name", c.name,
+    "--network", EGRESS_NETWORK,
+    "--user", `${c.uid}:${c.gid}`,
+    "-v", `${c.wsDir}:${WORKSPACE}`,
+    "-v", `${storeDir}:${PNPM_STORE_MOUNT}`,
+    "-w", WORKSPACE,
+    "-e", "HOME=/tmp/agent-home",
+    // pnpm reads npm_config_* from the environment; the command string stays
+    // the task file's, unchanged.
+    "-e", `npm_config_store_dir=${PNPM_STORE_MOUNT}`,
+    c.image,
+    "sh", "-c", command,
+  ];
+}
+
+/** Final checks: no network at all. A typecheck and a test run need none. */
+export function checkArgv(c: ToolContainer, command: string): string[] {
+  return [
+    "docker", "run", "--rm", "--init",
+    "--name", c.name,
+    "--network", "none",
+    "--user", `${c.uid}:${c.gid}`,
+    "-v", `${c.wsDir}:${WORKSPACE}`,
+    "-w", WORKSPACE,
+    "-e", "HOME=/tmp/agent-home",
+    c.image,
+    "sh", "-c", command,
+  ];
+}
+
+/** True when the image carries pnpm — images built before it was added do not. */
+export function imageHasPnpm(image: string): boolean {
+  return docker(["run", "--rm", "--network", "none", image, "pnpm", "--version"]).ok;
+}
+
 /** The env names worth forwarding: the adapter's own, plus the meter's. */
 export function forwardedEnvNames(
   adapterEnv: Record<string, string> | undefined,

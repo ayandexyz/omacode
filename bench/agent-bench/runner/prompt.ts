@@ -10,6 +10,7 @@
 import type { Instance } from "./types.js";
 
 export function taskPrompt(inst: Instance): string {
+  if (inst.grader === "judged") return judgedPrompt(inst);
   return [
     `You are working in a checkout of the ${inst.repo} repository.`,
     "",
@@ -22,5 +23,17 @@ export function taskPrompt(inst: Instance): string {
     "<issue>",
     inst.problemStatement.trim(),
     "</issue>",
+  ].join("\n");
+}
+
+/** Spec 2026-09-29-commit-reconstruction-bench.md §4.3. */
+function judgedPrompt(inst: Instance): string {
+  return [
+    "You are working in a checkout of the freecode repository. Implement the change",
+    "described below. When you are done, stop — do not commit.",
+    "",
+    "<task>",
+    inst.problemStatement.trim(),
+    "</task>",
   ].join("\n");
 }

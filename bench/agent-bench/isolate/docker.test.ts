@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { dockerArgv, forwardedEnvNames, type Containerize } from "./docker.js";
+import { EGRESS_NETWORK, checkArgv, dockerArgv, forwardedEnvNames, setupArgv, type Containerize } from "./docker.js";
 
 const c: Containerize = {
   image: "agent-bench",
@@ -50,4 +50,25 @@ test("dockerArgv: a configDir is mounted rw — opencode writes into XDG_CONFIG_
   assert.equal(mounts[i - 1], "-v");
   // NOT :ro — a read-only mount breaks opencode's package install.
   assert.ok(!mounts.some((a) => a.startsWith("/tmp/cfg:") && a.endsWith(":ro")));
+});
+
+const tool = { image: "agent-bench", name: "bench-setup-x", wsDir: "/tmp/ws", uid: 1000, gid: 1000 };
+
+test("setupArgv: the judged install runs in the agent's image, online, into an operator-owned store", () => {
+  const argv = setupArgv(tool, "/repo/.cache/pnpm-store", "pnpm install --frozen-lockfile");
+  const after = (flag: string) => argv[argv.indexOf(flag) + 1];
+  assert.equal(after("--network"), EGRESS_NETWORK, "install scripts may fetch prebuilt binaries");
+  assert.equal(after("--user"), "1000:1000");
+  assert.equal(after("--name"), "bench-setup-x");
+  assert.ok(argv.includes("/tmp/ws:/workspace"));
+  assert.ok(argv.includes("/repo/.cache/pnpm-store:/pnpm-store"));
+  assert.ok(argv.includes("npm_config_store_dir=/pnpm-store"));
+  assert.deepEqual(argv.slice(-4), ["agent-bench", "sh", "-c", "pnpm install --frozen-lockfile"]);
+});
+
+test("checkArgv: final checks run in the same image with no network and no store", () => {
+  const argv = checkArgv(tool, "pnpm -C apps/core test");
+  assert.equal(argv[argv.indexOf("--network") + 1], "none");
+  assert.equal(argv.some((a) => a.includes("pnpm-store")), false);
+  assert.deepEqual(argv.slice(-4), ["agent-bench", "sh", "-c", "pnpm -C apps/core test"]);
 });

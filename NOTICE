@@ -1,0 +1,17 @@
+This repository is licensed under the MIT License (see LICENSE), except where
+noted below.
+
+Third-party material
+--------------------
+
+bench/agent-bench/runner/buffbench-prompts.ts
+bench/agent-bench/runner/judge-prompt.ts
+  Contain prompts derived from Codebuff's BuffBench (evals/buffbench/
+  pick-commits.ts, eval-task-generator.ts and judge.ts):
+
+    Codebuff
+    Copyright 2025 Codebuff
+    Licensed under the Apache License, Version 2.0.
+    https://www.apache.org/licenses/LICENSE-2.0
+
+  Modifications are described in each file's header.

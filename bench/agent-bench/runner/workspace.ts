@@ -58,7 +58,8 @@ export interface Workspace {
  * `git diff` against the index is the whole result.
  */
 export function createWorkspace(inst: Instance): Workspace {
-  const mirror = ensureMirror(inst.repo);
+  // The judged set clones from the local repo: its commits may not be pushed.
+  const mirror = inst.source ?? ensureMirror(inst.repo);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-bench-"));
   // `--shared` hardlinks the object store instead of copying ~250MB per trial.
   // Safe here because nothing in a trial writes to the mirror.
