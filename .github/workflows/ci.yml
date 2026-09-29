@@ -69,3 +69,12 @@ jobs:
       # scripts/test-guard.mjs.
       - name: Test (other packages)
         run: pnpm turbo run test --filter='!@thisisayande/freecode-core' --filter='!@thisisayande/freecode'
+
+      # Drives the real TUI in tmux, each test with its own throwaway HOME:
+      # boot, the / menu, /help, /exit, Ctrl+C. No model call (the live turn
+      # needs FREECODE_E2E_LIVE=1 and a key). The suite refuses to skip under
+      # CI, so tmux must be present.
+      - name: TUI e2e (tmux)
+        run: |
+          command -v tmux >/dev/null || (sudo apt-get update && sudo apt-get install -y tmux)
+          pnpm -C apps/tui test:e2e
