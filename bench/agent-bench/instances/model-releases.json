@@ -1,0 +1,4 @@
+{
+  "_comment": "Public release date (YYYY-MM-DD) of every model an agent is pinned to, with a source URL. The judged set's window must start AFTER the release (spec 2026-09-29-commit-reconstruction-bench.md §4.8). Keys are the bare model id, lowercased. null = unknown, which fails the check.",
+  "minimax-m3": { "released": null, "source": null }
+}
