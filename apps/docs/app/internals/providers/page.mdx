@@ -16,6 +16,21 @@ The layer is thin on purpose. It does **not** reimplement HTTP clients — the
 the SDK can't decide for you: which prefix to cache, how long to wait before
 declaring a request dead, what a token count means, and who owns retries.
 
+## In plain English
+
+The agent loop should not need to know whether it is talking to Claude, GPT, or
+Gemini. It asks the provider layer for one consistent thing: a model response,
+usually streamed a small piece at a time. The provider layer translates that
+request into the vendor's format and translates the response back.
+
+For interviews, this is a **provider abstraction**: vendor-specific details are
+behind one interface, so the business logic depends on an abstraction rather
+than a particular API. FreeCode combines that abstraction with **streaming**,
+**prompt caching**, **timeouts**, **retry policy**, and **usage accounting**.
+Those terms mean, respectively: show output early, reuse an unchanged prompt
+prefix, stop hung requests, retry only recoverable failures, and measure token
+use and cost correctly.
+
 ## The contract
 
 ```ts

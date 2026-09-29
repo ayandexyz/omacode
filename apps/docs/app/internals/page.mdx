@@ -7,16 +7,47 @@ import { ArchitectureBlueprint } from "../_components/architecture-diagram/Archi
 
 # Internals
 
-This will be a guide to how FreeCode is made — each component explained in a
-beginner-friendly way, complete enough to know how real-world production AI
-agent harnesses work.
+This guide explains how FreeCode works from first principles. You do not need
+previous AI-agent experience: each page introduces the idea first, then shows
+the real source code behind it.
 
-This section is the architecture, not the usage. It follows one request all the
-way down: a prompt enters the loop, becomes a streamed provider call, comes back
-as tool calls, gets gated by permissions and hooks, executes, and folds back into
-the next turn — while the bus narrates the whole thing to your screen.
+At a high level, FreeCode repeats one cycle: you send a prompt; a model decides
+whether it needs a tool; FreeCode checks that action is allowed and runs it; the
+result returns to the model; and the cycle ends when the model has a final
+answer. This repeated **agent loop** is the core pattern behind a production AI
+coding harness.
 
 <ArchitectureBlueprint />
+
+## A one-minute mental model
+
+Think of FreeCode as a careful coordinator between you, your project, and a
+model. The user interface displays what is happening; `apps/core` keeps the
+conversation, calls the model, runs approved tools, and records what happened.
+The model never gets direct, unrestricted access to your files or shell.
+
+### Key terms worth knowing
+
+These are useful interview keywords, with the plain-English meaning first:
+
+- **Agent loop:** the repeat-until-finished cycle of model decision → tool use →
+  tool result → next model decision.
+- **JSON-RPC:** a small request/response protocol. A client calls a named method
+  such as `session.send`; core returns a result.
+- **Server-Sent Events (SSE):** a one-way live update stream used by the
+  browser/mobile client to receive text and tool progress as they happen.
+- **Event bus / pub-sub:** an internal message channel. Subsystems publish an
+  event once, and interested listeners receive it without calling each other
+  directly.
+- **Event sourcing / rollout log:** an append-only record of what happened in a
+  run. FreeCode uses it for tracing, replay, cost analysis, and evaluation.
+- **MCP (Model Context Protocol):** a standard way to add tools supplied by
+  external servers.
+- **Dependency injection (DI):** services are supplied through a runtime layer
+  instead of being hard-coded global imports, making them easier to replace in
+  tests.
+- **Fail closed:** when FreeCode is unsure whether an action is safe or valid,
+  it asks or blocks rather than silently allowing it.
 
 ## The thin-client boundary
 
@@ -75,24 +106,24 @@ Each page follows the request through its subsystem with references to the
 actual source files, not just a description of the concept — the goal is
 that you can read a page, then go straight to the file it names.
 
-## The invariants the codebase holds to
+## The safety and design rules the codebase keeps
 
-A handful of rules recur across every subsystem in this section, and are
-worth knowing before diving into any one page:
+A handful of rules recur across every subsystem. They are also useful examples
+of the trade-offs a production agent harness makes:
 
-- **Frontends have zero business logic.** No provider calls, no file
-  reading, no tool execution outside `apps/core`.
-- **One egress, one bridge.** The [event bus](/internals/bus) has exactly one
-  `subscribeAll` writer per process — adding a second silently double-prints
-  every event.
-- **Fail closed.** An unclassified tool is mutating
-  ([permissions](/internals/permissions)), an unconfigured eval judge closes
-  the gate rather than passing quietly ([eval](/internals/eval)), a denied
-  tool call still leaves a trace ([agent loop](/internals/agent-loop)).
-- **DI over singletons.** Services are resolved through
-  [Effect layers](/internals/runtime), not imported as module-level
-  singletons, so tests can swap a whole dependency graph at once.
-- **A denial is not silence.** A refused tool call is its own event type
-  (`function.denied`), never absent — see [Agent loop](/internals/agent-loop)
-  §"Denials" for why folding it into normal tool spans breaks several
-  consumers downstream.
+- **Core owns the business logic.** Frontends render and send requests; only
+  `apps/core` calls providers, reads files, or executes tools. This is the
+  **thin-client architecture** boundary.
+- **One event egress, one bridge.** The [event bus](/internals/bus) has one
+  `subscribeAll` writer per process. In simple terms: each event has one route
+  out to clients, preventing accidental duplicate updates.
+- **Fail closed.** An unclassified tool is treated as mutating
+  ([permissions](/internals/permissions)); an unconfigured eval judge closes a
+  release gate instead of passing quietly ([eval](/internals/eval)); and a
+  denied tool call still leaves a trace ([agent loop](/internals/agent-loop)).
+- **Dependency injection over singletons.** [Effect layers](/internals/runtime)
+  supply services instead of module-level global objects, so a test can replace
+  an entire dependency graph with safe test doubles.
+- **A denial is observable, not silence.** A refused tool call becomes its own
+  event type, `function.denied`, rather than disappearing. This keeps traces,
+  evaluations, and debugging honest.
