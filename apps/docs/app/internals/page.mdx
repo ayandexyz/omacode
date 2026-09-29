@@ -20,13 +20,19 @@ the next turn — while the bus narrates the whole thing to your screen.
 
 ## The thin-client boundary
 
-TUI, VS Code, Web, and the desktop app are pure presentation layers — they
-render and speak IPC, nothing else. Every frontend talks to `apps/core` over
-the same JSON-RPC protocol (`session.send`, `tools.call`, …), so a bug fix or
-a new capability written once in core reaches all four frontends without
-touching any of them. It also means core has no UI to leak into: it can be
-driven headlessly (CI, `freecode eval`, a script) with zero frontend code
-loaded at all. See [IPC protocol](/internals/ipc) for the wire format.
+TUI, VS Code, the browser/mobile client, and the desktop app are pure
+presentation layers — they render and speak IPC, nothing else. A request first
+reaches core's server, which starts or resumes a session and hands the work to
+the agent loop. TUI and VS Code use JSON-RPC over standard input/output; the
+browser/mobile client uses the same JSON-RPC methods over HTTP and receives live
+updates through Server-Sent Events (SSE). The event bus publishes those updates;
+it does not route requests.
+
+That boundary means a bug fix or a new capability written once in core reaches
+every client without duplicating the agent logic. It also means core can run
+headlessly — in CI, `freecode eval`, or a script — with no UI code loaded. The
+separate `apps/web` project is FreeCode's public website, not this coding
+client. See [IPC protocol](/internals/ipc) for the wire format.
 
 ## Where each subsystem lives
 

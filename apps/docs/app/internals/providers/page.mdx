@@ -1,6 +1,6 @@
 ---
 title: "Provider layer"
-description: "One interface, six providers, no special cases in the loop."
+description: "One interface for a broad catalogue of providers, with no vendor logic in the loop."
 ---
 
 # Provider layer
@@ -49,34 +49,29 @@ Two fields on `ExecuteOptions` are less obvious than they look:
   extraction picks the provider's cheap default on purpose), and loudly from one
   that didn't.
 
-## The six providers
+## The provider catalogue
 
 ```mermaid
 graph LR
-    A["registry.ts"] -->|"initProviders()"| B["import each adapter"]
-    B -->|"side effect"| C["registerProvider(id, { info, create })"]
+    A["catalogue snapshot + local cache"] --> B["supported SDK factory?"]
+    B -->|"yes"| C["generic provider"]
+    C --> D["registerProvider(id, { info, create })"]
+    E["Gemini web session"] --> F["special provider"]
 ```
 
-Registration is a module side effect: importing `providers/index.ts` calls
-`initProviders()`, which imports all six, each of which calls
-`registerProvider` at the bottom of its file. Nothing lists providers centrally,
-so adding one is a file plus one line in the init list.
+FreeCode does not maintain one adapter file per vendor. At startup,
+`initProviders()` reads a generated **models.dev catalogue snapshot**, overlays a
+locally cached catalogue when available, and registers every entry for which
+FreeCode ships an SDK factory — about 198 API-key providers at the time of
+writing. The SDK and credentials are loaded only when you actually make a
+request, so having a large catalogue does not make an ordinary session slower.
 
-| id | SDK package | Endpoint | Default model | System shape |
-| --- | --- | --- | --- | --- |
-| `anthropic` | `@ai-sdk/anthropic` | native | `claude-sonnet-4-5` | blocks, with cache markers |
-| `openai` | `@ai-sdk/openai` | native | `gpt-4o` | joined string |
-| `gemini` | `@ai-sdk/google` | native | `gemini-3.6-flash` | joined string |
-| `deepseek` | `@ai-sdk/deepseek` | native | `deepseek-chat` | joined string |
-| `minimax` | `@ai-sdk/anthropic` | `api.minimax.io/anthropic/v1` | `MiniMax-M2` | blocks, with cache markers |
-| `zai` | `@ai-sdk/anthropic` | `api.z.ai/api/anthropic` | `glm-5.2` | blocks, with cache markers |
+The familiar providers — Anthropic, OpenAI, Gemini, MiniMax, DeepSeek, and Z.ai
+— are featured defaults, not the complete support list. `gemini-web` is the
+one intentional exception: it uses a signed-in Gemini web session and its own
+direct protocol instead of the API-provider catalogue.
 
-MiniMax and Z.ai expose Anthropic-Messages-compatible endpoints, so they reuse
-`@ai-sdk/anthropic` with a different `baseURL` rather than a hand-rolled client.
-That is the cheapest way to add a vendor and it inherits cache-breakpoint
-support for free.
-
-The split in the last column is the only real behavioural fork in the layer.
+The important behavioural fork in the layer is the request shape.
 **Anthropic-shaped** providers get `SystemBlock[]` mapped to
 `{ role: "system", content, providerOptions }` parts so individual blocks can
 carry a cache breakpoint. **OpenAI-shaped** providers get the blocks joined
@@ -360,20 +355,18 @@ is never reported as a bust.
 
 ## Adding a provider
 
-1. Copy the closest adapter — Anthropic-shaped (`zai.ts` is the smallest) or
-   OpenAI-shaped (`deepseek.ts`).
-2. `PROVIDER_INFO` with a real `defaultModel` that exists on models.dev under
-   *the same id you register*.
-3. One `buildOptions(opts)` shared by `execute` and `stream`. Splitting them is
-   how a cache key reaches half a session's turns.
-4. `maxRetries: PROVIDER_MAX_RETRIES`, `fetch: createTimeoutFetch()`,
-   `abortSignal: opts.abortSignal` — all three, every time.
-5. `mapUsage(result.usage, result.providerMetadata)` — never hand-roll usage.
-6. `registerProvider(id, …)` at the bottom, and add the import to
-   `initProviders()`.
-7. Add the env var to `ENV_KEYS` in `config.ts`.
+Most providers arrive through models.dev automatically. Refresh the shipped
+offline catalogue with `pnpm gen:catalogue`; FreeCode registers the new entry
+when its SDK package has a factory in `sdk-factories.ts` and it authenticates
+with a plain API key.
 
-Expect quirks. MiniMax stringifies numeric tool arguments, which is why
+Add a catalogue override only when FreeCode has verified a necessary difference
+from models.dev, such as a custom endpoint, a safe default model, or a request
+shape. Add a bespoke provider only for a genuinely different authentication or
+transport path — `gemini-web` is the example. That keeps vendor-specific code
+out of the agent loop.
+
+Expect quirks. Some models stringify numeric tool arguments, which is why
 `coerceArgs` exists in the tool orchestrator and why every schema property needs
 an explicit `type`.
 
@@ -384,52 +377,44 @@ an explicit `type`.
    (`effect/layers.ts:68`, `:182`), but nothing ever resolves it — the loop calls
    `getProvider()` directly, so the DI seam that would let a test swap the
    provider registry is inert.
-2. **`getProvider()` constructs a new client on every call**
-   (`registry.ts:24`), and each constructor calls `getApiKey()`, which does a
-   synchronous `readFileSync` + `JSON.parse` of `~/.freecode/config.json`. That
-   is a blocking disk read per provider call — at least once per turn, plus once
-   per compaction. Memoizing per id would be a few lines.
-3. **`ProviderDefinition.create(apiKey)` ignores its argument.** All six
-   adapters take `_apiKey` and call `getApiKey()` themselves, and `getProvider`
-   passes `""`. The parameter is vestigial and misleading.
-4. **`summarizeCache`'s hit ratio is wrong and unused.** It computes
+2. **`summarizeCache`'s hit ratio is wrong and unused.** It computes
    `read / (read + inputTokens)` (`cache-awareness.ts:71`) treating `inputTokens`
    as the fresh portion — but the normalized shape makes it *inclusive* of cache
    reads and writes, so reads are double-counted in the denominator and the ratio
    is understated. Nothing outside its own test reads the field; the loop
    destructures only `readTokens` and `writeTokens`. The test asserts the old
    non-inclusive semantics.
-5. **A total cache failure is the one thing the detector can't see.** The loop's
+3. **A total cache failure is the one thing the detector can't see.** The loop's
    `emitCacheWarm` returns early when reads *and* writes are both zero
    (`loop.ts:1910`), so `checkCacheUsage` is never called — and its own
    `!reportsCache` branch would bail anyway. The `expected_read_missing` case is
    reachable only when a write happened. "Caching stopped entirely" is exactly
    the failure worth alarming on.
-6. **Only `anthropic` counts as a caching provider for the cold warning.**
+4. **Only `anthropic` counts as a caching provider for the cold warning.**
    `CACHING_PROVIDERS` (`cache-awareness.ts:24`) is a one-element set, yet
    `minimax` and `zai` go through the same Anthropic endpoint shape and carry the
    same `cacheControl` markers. Their users never see the cold-cache warning.
-7. **A changing tool set busts the cache with no journal entry.** When an MCP
+5. **A changing tool set busts the cache with no journal entry.** When an MCP
     server connects or disconnects, `invalidateToolDefs()` rebuilds the tools
     array; the tools block sits in the cached prefix, so the next request must
     miss. Nothing calls `recordInvalidation`, so the miss detector reports it as
     an unexplained bust — the exact false positive the journal exists to prevent.
-8. **`ExecuteResult.thinking` is dead for every provider.** All six set
-    `thinking: undefined` in `execute()`; reasoning reaches the loop only as
+6. **`ExecuteResult.thinking` is dead on the generic non-streaming path.**
+    Reasoning reaches the loop only as
     `thinking_delta` chunks on the streaming path. A non-streaming turn silently
     loses extended thinking, and there is no way to configure a thinking budget
     or reasoning effort anywhere in `ExecuteOptions`.
-9. **`ProviderInfo.maxOutputTokens`'s documentation is stale.** Its comment
+7. **`ProviderInfo.maxOutputTokens`'s documentation is stale.** Its comment
     (`types.ts:10`) says compaction subtracts it from the context limit;
     compaction actually subtracts `resolveMaxOutputTokens()`, which reads
     models.dev and caps at 32K. The field is only a fallback for callers that
-    omit `maxTokens`, and it is 4096 for four of the six providers.
-10. **`session/normalize/` is unreachable.** The v4 spec describes a
+    omit `maxTokens`, and it is often the generic 4096 fallback.
+8. **`session/normalize/` is unreachable.** The v4 spec describes a
     `ProviderResponseNormalizer` as a separate layer with per-provider modules;
     nothing in the codebase imports it. Normalization actually happens in
     `streaming.ts` plus `mapUsage`. The directory includes a second, independent
     `[TOOL_CALLS]` parser that duplicates the one in `loop.ts`.
-11. **`browser/` has zero importers.** `CLAUDE.md` calls the Playwright path
+9. **`browser/` has zero importers.** `CLAUDE.md` calls the Playwright path
     "legacy / not wired into the primary path" — it is in fact unreachable: no
     file outside the directory imports anything from it, and `chatgpt` is not in
     the provider registry. It is dead code, not a fallback.
@@ -449,8 +434,10 @@ an explicit `type`.
 | Miss detection | `apps/core/src/providers/cache-miss.ts` |
 | API keys, config.json, fallback chain | `apps/core/src/providers/config.ts` |
 | Context windows, output limits, vision | `apps/core/src/models-dev.ts` |
-| An Anthropic-shaped adapter | `apps/core/src/providers/zai.ts` |
-| An OpenAI-shaped adapter | `apps/core/src/providers/deepseek.ts` |
+| Catalogue resolution and overrides | `apps/core/src/providers/catalogue.ts` |
+| Generic API provider | `apps/core/src/providers/generic-provider.ts` |
+| SDK factories | `apps/core/src/providers/sdk-factories.ts` |
+| Gemini web-session provider | `apps/core/src/providers/gemini-web/` |
 
 Related: [Agent loop](/internals/agent-loop) for who calls this and how retries
 and fallback work, [Compaction](/internals/compaction) for the budget that

@@ -64,7 +64,8 @@ export function ClientsNode({ selectedNode, onSelectNode }: ClientsNodeProps) {
         React webview
       </text>
 
-      {/* Web (Next.js) */}
+      {/* Browser/mobile client. The separately named apps/web is the public
+          website; the coding client is the Vite bundle served by core. */}
       <rect
         x="25"
         y="312"
@@ -75,10 +76,10 @@ export function ClientsNode({ selectedNode, onSelectNode }: ClientsNodeProps) {
         stroke="rgba(129, 140, 248, 0.4)"
       />
       <text x="80" y="324" className={styles.subCardText} textAnchor="middle">
-        Web
+        Web / mobile
       </text>
       <text x="80" y="334" className={styles.subCardDesc} textAnchor="middle">
-        Next.js
+        HTTP + SSE
       </text>
 
       {/* Desktop (Tauri) */}

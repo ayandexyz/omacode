@@ -152,6 +152,39 @@
   fill: rgba(20, 23, 40, 0.9);
 }
 
+/* Core request boundary */
+.nodeBoxIpc {
+  fill: rgba(8, 24, 30, 0.85);
+  stroke: rgba(34, 211, 238, 0.45);
+  stroke-width: 1.8;
+  transition: all 0.3s ease;
+}
+
+.nodeGroup:hover .nodeBoxIpc {
+  stroke: rgba(34, 211, 238, 0.9);
+  fill: rgba(10, 32, 40, 0.92);
+}
+
+.ipcHeader {
+  fill: #a5f3fc;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  font-family: monospace;
+}
+
+.ipcText {
+  fill: rgba(255, 255, 255, 0.85);
+  font-size: 9px;
+  font-family: monospace;
+}
+
+.ipcSubtext {
+  fill: rgba(165, 243, 252, 0.65);
+  font-size: 8px;
+  font-family: monospace;
+}
+
 /* Agent Loop Box */
 .nodeBoxAgent {
   fill: rgba(30, 16, 8, 0.85);

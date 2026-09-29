@@ -6,6 +6,7 @@ import { DiagramDefinitions } from "./definitions/DiagramDefinitions";
 import { BackgroundGrid } from "./BackgroundGrid";
 import { SandboxContainer } from "./SandboxContainer";
 import { TaskFlow } from "./flows/TaskFlow";
+import { EventFlow } from "./flows/EventFlow";
 import { SubagentFlow } from "./flows/SubagentFlow";
 import { ContextFlow } from "./flows/ContextFlow";
 import { MemoryFlow } from "./flows/MemoryFlow";
@@ -14,6 +15,7 @@ import { ResultFlow } from "./flows/ResultFlow";
 import { ProviderFlow } from "./flows/ProviderFlow";
 import { CompactionFlow } from "./flows/CompactionFlow";
 import { ClientsNode } from "./nodes/ClientsNode";
+import { IpcNode } from "./nodes/IpcNode";
 import { AgentNode } from "./nodes/AgentNode";
 import { SubagentsNode } from "./nodes/SubagentsNode";
 import { ContextNode } from "./nodes/ContextNode";
@@ -28,6 +30,7 @@ import { InteractiveGuide } from "./InteractiveGuide";
 
 export type NodeType =
   | "clients"
+  | "ipc"
   | "agent"
   | "subagents"
   | "context"
@@ -72,6 +75,7 @@ export function FreeCodeInternalDiagram({
 
           {/* ==================== CONNECTIONS / FLOWS ==================== */}
           <TaskFlow />
+          <EventFlow />
           <SubagentFlow />
           <ContextFlow />
           <MemoryFlow />
@@ -86,6 +90,7 @@ export function FreeCodeInternalDiagram({
             selectedNode={selectedNode}
             onSelectNode={onSelectNode}
           />
+          <IpcNode selectedNode={selectedNode} onSelectNode={onSelectNode} />
           <AgentNode selectedNode={selectedNode} onSelectNode={onSelectNode} />
           <SubagentsNode
             selectedNode={selectedNode}
