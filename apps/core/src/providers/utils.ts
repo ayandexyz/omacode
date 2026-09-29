@@ -348,22 +348,28 @@ export function convertToCoreMessages(messages: Message[]): ModelMessage[] {
             // hold a raw JSON string here — send `{}` rather than brick them.
             input: isPlainObject(part.tool.args) ? part.tool.args : {},
           });
-          if (part.result !== undefined) {
-            toolResults.push({
-              type: "tool-result",
-              toolCallId: part.tool.id,
-              toolName: part.tool.tool,
-              // AI SDK v6 requires a structured ToolResultOutput, not a raw
-              // string — otherwise the ModelMessage[] schema rejects it.
-              output: {
-                type: "text",
-                value:
-                  typeof part.result === "string"
+          // Every call is answered, even one with no recorded result: an
+          // unanswered tool_use is rejected, and history is re-sent every
+          // turn, so a single orphan fails every later request in the
+          // session. The loop always persists a result (appendToolMessage),
+          // so this only catches old or hand-edited sessions. The text says
+          // what happened instead of inventing an outcome.
+          toolResults.push({
+            type: "tool-result",
+            toolCallId: part.tool.id,
+            toolName: part.tool.tool,
+            // AI SDK v6 requires a structured ToolResultOutput, not a raw
+            // string — otherwise the ModelMessage[] schema rejects it.
+            output: {
+              type: "text",
+              value:
+                part.result === undefined
+                  ? "[no result was recorded for this call; it may have been interrupted]"
+                  : typeof part.result === "string"
                     ? part.result
                     : JSON.stringify(part.result),
-              },
-            });
-          }
+            },
+          });
         }
       }
 
