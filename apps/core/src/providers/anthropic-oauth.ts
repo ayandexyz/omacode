@@ -41,7 +41,7 @@ export const ANTHROPIC_OAUTH = {
    * its `jcode-provider-core/src/anthropic.rs` if that day comes.
    */
   betas: "claude-code-20250219,oauth-2025-04-20",
-  userAgent: "claude-cli/2.1.257 (external, sdk-cli)",
+  userAgent: "claude-cli/2.1.280 (external, sdk-cli)",
 } as const;
 
 export const CLAUDE_CODE_IDENTITY =
@@ -59,7 +59,7 @@ export const CLAUDE_CODE_IDENTITY =
  * copied verbatim.
  */
 export const CLAUDE_CODE_BILLING_BLOCK =
-  "x-anthropic-billing-header: cc_version=2.1.257; cc_entrypoint=sdk-cli; cch=33f85;";
+  "x-anthropic-billing-header: cc_version=2.1.280; cc_entrypoint=sdk-cli; cch=33f85;";
 
 /**
  * Scopes the inference API accepts, per jcode's `claude_scopes_have_inference`.

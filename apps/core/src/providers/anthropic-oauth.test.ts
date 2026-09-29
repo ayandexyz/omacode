@@ -538,8 +538,8 @@ test("billing attribution leads the OAuth system param, before the identity", ()
   assert.equal(blocks[0].cache, undefined);
   assert.equal(blocks[1].cache, undefined);
   assert.equal(blocks[2].cache, true);
-  assert.equal(ANTHROPIC_OAUTH.userAgent.includes("2.1.257"), true);
-  assert.equal(CLAUDE_CODE_BILLING_BLOCK.includes("cc_version=2.1.257"), true);
+  assert.equal(ANTHROPIC_OAUTH.userAgent.includes("2.1.280"), true);
+  assert.equal(CLAUDE_CODE_BILLING_BLOCK.includes("cc_version=2.1.280"), true);
 });
 
 test("forbidden: a latched 403 drops the identity block, keeping the §0.1 invariant", () => {

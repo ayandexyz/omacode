@@ -169,13 +169,13 @@ rather than storing a token that will 403 later.
 | --- | --- |
 | `Authorization` | `Bearer <access_token>` — and **no `x-api-key`** |
 | `anthropic-beta` | `claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,…` (jcode's current full list is in `jcode-provider-core/src/anthropic.rs`; start with `claude-code-20250219,oauth-2025-04-20` plus whatever betas we already send, and extend only on observed rejection) |
-| `User-Agent` | `claude-cli/2.1.257 (external, sdk-cli)` (version drifts; copy jcode's current) |
+| `User-Agent` | `claude-cli/2.1.280 (external, sdk-cli)` (version drifts; copy jcode's current) |
 
 Body requirements:
 
 - **System param:** two prepended blocks, in the official CLI's order, then our
   real system prompt:
-  1. `x-anthropic-billing-header: cc_version=2.1.257; cc_entrypoint=sdk-cli; cch=33f85;`
+  1. `x-anthropic-billing-header: cc_version=2.1.280; cc_entrypoint=sdk-cli; cch=33f85;`
      — Claude Code's **billing attribution**, which jcode observed in the real
      CLI's system blocks (`OAUTH_BILLING_HEADER`). Despite the name it is a
      system block, not an HTTP header. `cc_version` must stay in lockstep with
