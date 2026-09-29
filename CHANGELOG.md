@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.43.1
+
+ChatGPT subscriptions. `freecode auth login openai` serves the `openai` provider from a ChatGPT Plus/Pro plan through the Codex backend, the same way `freecode auth login anthropic` does for Claude Pro/Max. Also: the Claude subscription login works again on newer models, and a session with an unanswered tool call no longer fails every later request.
+
+### Added
+
+- **ChatGPT Plus/Pro subscription for `openai`** (`f3b8d0b8`). `freecode auth login|status|logout openai`: PKCE login with the Codex CLI's client id on `localhost:1455` (paste fallback), requests sent to `chatgpt.com/backend-api/codex/responses`. The backend only streams and rejects `max_output_tokens` and `temperature`, so the wrapper forces streaming, strips those, and reassembles non-streaming calls from the stream. Opt-in like Anthropic (`providers.openai.authMode`, `FREECODE_OPENAI_AUTH`); an API key on the machine still wins. Subscription calls are recorded with no dollar cost. freecode keeps its own login and never copies `~/.codex/auth.json`, because a shared rotating refresh token logs one program out. Spec: `docs/specs/2026-09-29-openai-codex-oauth-provider.md`; guide: `getting-started/openai-subscription`.
+- **Judged commit-reconstruction bench** (`42509041`, `f6db196a`, `171381ea`, `323d6b40`, `8a54c088`, `bab2da29`, `877a957e`, `0fb0bdf4`, `35ef4d7b`): `pnpm bench:commits`, `bench:tasks`, `bench:judge` and `bench:agents --set freecode-commits`. Gemini scores, GPT audits 20%, and a contamination window refuses models released after the task window opens. Operator page: `AGENT-BENCH.md` §3d.
+- **Eval cases** (`74a240ba`): AGENTS.md naming the test command, and a real tool call after a compaction summary.
+- **CI test guard** (`b4e7b0d7`): fails when core or TUI runs fewer tests or files than `.github/test-baselines.json` records.
+- **TUI coverage** (`c67c3597`, `21ddac66`): a tmux end-to-end smoke suite, plus tests for the slash menu, permission prompt, diff view and tool results.
+
+### Fixed
+
+- **Claude subscription on newer models** (`11eab91a`). The Claude Code version freecode reports was bumped from 2.1.257 to 2.1.280; Anthropic now refuses older versions for some models ("Claude Code 2.1.257 does not support this model").
+- **A tool call with no recorded result is answered on the wire** (`d0a1478a`). An unanswered `tool_use` is rejected, and history is re-sent every turn, so one orphan (old or hand-edited sessions) failed every later request in a session. It now goes out with a result saying none was recorded.
+
+### Notes
+
+Tests: core 1848/1848, TUI 360/360, typecheck clean. The ChatGPT path was checked live on 2026-09-29: a streamed tool call, a follow-up turn, a non-streaming call and a full `freecode run` turn. The browser login itself has not been run live. Whether a spent ChatGPT usage window is recognised as a quota error is unverified (TODO.md).
+
 ## v0.43.0
 
 Overnight runs. `freecode night "<objective>"` works unattended: a loop of short, fresh-session iterations, each ending in a `finish_iteration` call, with the orchestrator — not the model — committing successes to a `night/<slug>` branch and resetting failures. Nothing waits on a human; a spent subscription window is waited out; the morning report leads with what needs you. Alongside it, the model no longer refuses an explicit request to use the `question` tool, and MiniMax and Gemini get small, measured prompt overlays.
