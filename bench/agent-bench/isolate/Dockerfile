@@ -10,6 +10,10 @@ ARG CLAUDE_CODE_VERSION=2.1.251
 ARG OPENCODE_VERSION=1.18.25
 # A released freecode binary — the self-contained bun build, never the SEA one.
 ARG FREECODE_VERSION=v0.43.0
+# The judged set (commit-reconstruction spec §4.7) installs this repo's
+# dependencies and runs its checks inside this image. Matches the repo's
+# `packageManager` pin.
+ARG PNPM_VERSION=10.0.0
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates curl \
@@ -21,6 +25,7 @@ RUN apt-get update \
 RUN npm install -g \
       @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
       opencode-ai@${OPENCODE_VERSION} \
+      pnpm@${PNPM_VERSION} \
       tsx@4
 
 RUN curl -fsSL -o /tmp/freecode.tar.gz \
