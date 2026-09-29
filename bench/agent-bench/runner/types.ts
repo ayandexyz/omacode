@@ -61,6 +61,31 @@ export interface Instance {
   repo: string;
   baseCommit: string;
   problemStatement: string;
+  /**
+   * "judged": a task rebuilt from this repo's own commits, scored by the
+   * judges (spec 2026-09-29-commit-reconstruction-bench.md). Absent means
+   * SWE-bench. The judged answer key (`fileDiffs`, `spec`, `sha`) never lands
+   * on an Instance — `judged-instances.ts` drops it, as `instances.ts` does.
+   */
+  grader?: "swebench" | "judged";
+  /** A local git dir to clone from instead of the GitHub mirror. */
+  source?: string;
+  /** Run in the workspace before the agent starts (dependency install). */
+  initCommand?: string;
+  /** Run in the workspace after the agent stops; output goes to the judges. */
+  finalCheckCommands?: string[];
+}
+
+/** One trial's verdict from `bench:judge`, the full record is judging.json. */
+export interface TrialJudging {
+  overallScore: number;
+  completionScore: number;
+  codeQualityScore: number;
+  scoredBy: string;
+  audited?: true;
+  fallback?: true;
+  judgeFailed?: true;
+  judgeScores: { judgeId: string; overallScore?: number; failed?: true }[];
 }
 
 export interface TrialRecord {
@@ -103,9 +128,26 @@ export interface TrialRecord {
    * run was never graded.
    */
   resolved?: boolean | null;
+  /** Judged set only: exit code of each final check (full output in final-checks.json). */
+  finalChecks?: { command: string; exitCode: number }[];
+  /** Judged set only: written by `bench:judge`. */
+  judging?: TrialJudging;
 }
 
 export interface Report {
+  /** Absent on runs from before the judged set existed: those are SWE-bench. */
+  set?: "swe-bench-lite" | "freecode-commits";
+  /**
+   * Judged set only (spec §4.8): the task window and each model's release
+   * date, side by side. `checked: false` = the run was started with
+   * --contamination-unchecked, which makes it unpublishable.
+   */
+  contamination?: {
+    checked: boolean;
+    window: { since: string; until: string | null } | null;
+    releases: Record<string, string | null>;
+    problems: string[];
+  };
   startedAt: string;
   finishedAt: string;
   isolation: "none" | "container";
