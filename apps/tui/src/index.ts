@@ -72,6 +72,9 @@ import {
   sessionClaudeList,
   sessionClaudeTranscript,
   sessionClaudeImport,
+  sessionCodexList,
+  sessionCodexTranscript,
+  sessionCodexImport,
   listProviders,
   listModels,
   listCommands,
@@ -138,7 +141,7 @@ import { getMessages, clearMessages } from "./state/message-store.js";
 import { VirtualMessageList } from "./components/virtual-message-list.js";
 import { parseAgentActivity } from "@thisisayande/freecode-shared";
 import { PromptEditor, stripImageTokens } from "./components/prompt-editor.js";
-import { ResumePicker } from "./components/resume-picker.js";
+import { ResumePicker, type ResumeTab } from "./components/resume-picker.js";
 import { MaskedInput } from "./components/masked-input.js";
 import { InterruptController } from "./interrupt-controller.js";
 import { SafeTUI } from "./render-guard.js";
@@ -169,6 +172,7 @@ import { createPermissionPicker } from "./components/permission-picker.js";
 import { EffortPicker } from "./components/effort-picker.js";
 import type {
   ClaudeSessionMeta,
+  CodexSessionMeta,
   ContextBreakdown,
   ProviderInfo,
   SerializedMessage,
@@ -1689,18 +1693,26 @@ async function showResumePicker(): Promise<void> {
   hideMcpSelector();
 
   try {
-    // Fetch both lists in parallel; the Claude Code list is best-effort.
-    // A failure (no ~/.claude on this machine) is silently swallowed and
-    // the Claude Code tab renders empty — the Freecode tab stays primary.
-    const [sessions, claudeSessionsRaw] = await Promise.all([
+    // Fetch all lists in parallel; the Claude Code and Codex lists are
+    // best-effort. A failure (no ~/.claude or ~/.codex on this machine) is
+    // swallowed and that tab renders empty (Codex's is hidden).
+    const [sessions, claudeSessionsRaw, codexSessions] = await Promise.all([
       sessionList({}),
       sessionClaudeList({}).catch((err): ClaudeSessionMeta[] => {
         console.warn("Failed to list Claude Code sessions:", err);
         return [];
       }),
+      sessionCodexList().catch((err): CodexSessionMeta[] => {
+        console.warn("Failed to list Codex sessions:", err);
+        return [];
+      }),
     ]);
 
-    if (sessions.length === 0) {
+    if (
+      sessions.length === 0 &&
+      claudeSessionsRaw.length === 0 &&
+      codexSessions.length === 0
+    ) {
       showMessage("**No previous sessions to resume.**");
       return;
     }
@@ -1717,7 +1729,7 @@ async function showResumePicker(): Promise<void> {
 
     async function ensurePreview(
       sessionId: string,
-      tab: "freecode" | "claude-code",
+      tab: ResumeTab,
     ): Promise<void> {
       if (previewCache.has(sessionId)) return;
       if (inflightId === sessionId) return;
@@ -1726,7 +1738,9 @@ async function showResumePicker(): Promise<void> {
         const messages =
           tab === "freecode"
             ? ((await sessionResume(sessionId)).messages ?? [])
-            : ((await sessionClaudeTranscript(sessionId)).messages ?? []);
+            : tab === "codex"
+              ? ((await sessionCodexTranscript(sessionId)).messages ?? [])
+              : ((await sessionClaudeTranscript(sessionId)).messages ?? []);
         previewCache.set(sessionId, messages);
         if (
           resumeSelector &&
@@ -1752,15 +1766,17 @@ async function showResumePicker(): Promise<void> {
       onSelect: async (sessionId: string, tab) => {
         hideResumeSelector();
         showMessage(
-          tab === "claude-code"
-            ? `**Importing Claude Code session...**`
-            : `**Resuming session...**`,
+          tab === "freecode"
+            ? `**Resuming session...**`
+            : `**Importing ${tab === "codex" ? "Codex" : "Claude Code"} session...**`,
         );
         try {
           const freecodeId =
             tab === "claude-code"
               ? (await sessionClaudeImport(sessionId)).sessionId
-              : sessionId;
+              : tab === "codex"
+                ? (await sessionCodexImport(sessionId)).sessionId
+                : sessionId;
           const result = await sessionResume(freecodeId);
           currentSession = { sessionId: result.sessionId };
           resetSessionCacheTotals();
@@ -1783,7 +1799,7 @@ async function showResumePicker(): Promise<void> {
         tui.setFocus(editor);
         tui.requestRender();
       },
-    });
+    }, codexSessions);
 
     resumeSelector = picker;
 

@@ -43,7 +43,7 @@ interface Entry {
 
 type Block = Record<string, unknown>;
 
-function cut(s: string): string {
+export function cut(s: string): string {
   return s.length <= TOOL_TEXT_MAX
     ? s
     : `${s.slice(0, TOOL_TEXT_MAX)}\n[… ${s.length - TOOL_TEXT_MAX} chars omitted]`;
@@ -53,7 +53,11 @@ function resultText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
-    .map((c) => (c && typeof c === "object" && typeof (c as Block).text === "string" ? (c as Block).text : ""))
+    .map((c) =>
+      c && typeof c === "object" && typeof (c as Block).text === "string"
+        ? (c as Block).text
+        : "",
+    )
     .join("\n");
 }
 
@@ -108,30 +112,50 @@ export async function convertClaudeTranscript(
     const c = e.message?.content;
     if (!Array.isArray(c)) continue;
     for (const b of c as Block[]) {
-      if (b?.type === "tool_result") results.set(String(b.tool_use_id), resultText(b.content));
+      if (b?.type === "tool_result")
+        results.set(String(b.tool_use_id), resultText(b.content));
     }
   }
 
   const all: SerializedMessage[] = [];
   for (const e of entries) {
     const role = e.message?.role;
-    if ((role !== "user" && role !== "assistant") || e.isMeta || e.isSidechain) continue;
-    const text = entryText(e.message?.content, results);
-    if (!text) continue;
-    const last = all[all.length - 1];
-    if (last?.role === role) {
-      last.parts[0]!.content += `\n\n${text}`;
+    if ((role !== "user" && role !== "assistant") || e.isMeta || e.isSidechain)
       continue;
-    }
-    const ts = e.timestamp ? Date.parse(e.timestamp) : NaN;
-    all.push({
-      id: randomUUID(),
-      role,
-      parts: [{ type: "text", content: text }],
-      timestamp: Number.isFinite(ts) ? ts : Date.now(),
-    });
+    pushText(all, role, entryText(e.message?.content, results), e.timestamp);
   }
 
+  return { messages: capMessages(all, max, "Claude Code"), cwd };
+}
+
+/** Append `text` as a message, merging into the previous one if same role. */
+export function pushText(
+  all: SerializedMessage[],
+  role: "user" | "assistant",
+  text: string,
+  timestamp?: string,
+): void {
+  if (!text) return;
+  const last = all[all.length - 1];
+  if (last?.role === role) {
+    last.parts[0]!.content += `\n\n${text}`;
+    return;
+  }
+  const ts = timestamp ? Date.parse(timestamp) : NaN;
+  all.push({
+    id: randomUUID(),
+    role,
+    parts: [{ type: "text", content: text }],
+    timestamp: Number.isFinite(ts) ? ts : Date.now(),
+  });
+}
+
+/** Keep the last `max` messages behind a note saying how many were dropped. */
+export function capMessages(
+  all: SerializedMessage[],
+  max: number,
+  source: string,
+): SerializedMessage[] {
   const kept = all.slice(-max);
   const omitted = all.length - kept.length;
   if (omitted > 0) {
@@ -141,13 +165,13 @@ export async function convertClaudeTranscript(
       parts: [
         {
           type: "text",
-          content: `[Imported from Claude Code: ${omitted} older messages were omitted.]`,
+          content: `[Imported from ${source}: ${omitted} older messages were omitted.]`,
         },
       ],
       timestamp: kept[0]!.timestamp,
     });
   }
-  return { messages: kept, cwd };
+  return kept;
 }
 
 /**
@@ -168,14 +192,31 @@ export async function importClaudeSession(
 
   const { messages, cwd } = await convertClaudeTranscript(fullPath);
   const projectPath =
-    cwd ?? decodeProjectSlug(path.basename(path.dirname(fullPath))) ?? process.cwd();
-  const firstPrompt = messages.find((m) => m.role === "user")?.parts[0]?.content;
+    cwd ??
+    decodeProjectSlug(path.basename(path.dirname(fullPath))) ??
+    process.cwd();
   const title =
     (await extractTitleFromJsonl(fullPath)) ??
-    firstPrompt?.split("\n")[0]!.slice(0, 80) ??
+    firstPromptTitle(messages) ??
     "Claude Code session";
-
-  await store.createSession({ title, projectPath, provider }, id);
-  for (const msg of messages) await store.appendMessage(id, msg, projectPath);
+  await saveImported(store, id, { title, projectPath, provider }, messages);
   return id;
+}
+
+export function firstPromptTitle(
+  messages: SerializedMessage[],
+): string | undefined {
+  const text = messages.find((m) => m.role === "user")?.parts[0]?.content;
+  return text?.split("\n")[0]!.slice(0, 80);
+}
+
+export async function saveImported(
+  store: SessionStore,
+  id: string,
+  meta: { title: string; projectPath: string; provider: string },
+  messages: SerializedMessage[],
+): Promise<void> {
+  await store.createSession(meta, id);
+  for (const msg of messages)
+    await store.appendMessage(id, msg, meta.projectPath);
 }

@@ -26,6 +26,7 @@ export type {
   SessionResumeResult,
   SessionFilter,
   ClaudeSessionMeta,
+  CodexSessionMeta,
   ClaudeTranscript,
   ClaudeListFilter,
   ContextSegmentId,

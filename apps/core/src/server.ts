@@ -134,9 +134,15 @@ import {
   readClaudeTranscript,
   importClaudeSession,
 } from "./claude-sessions/index.js";
+import {
+  listCodexSessions,
+  readCodexTranscript,
+  importCodexSession,
+} from "./codex-sessions/index.js";
 import type {
   ClaudeSessionMeta,
   ClaudeTranscript,
+  CodexSessionMeta,
 } from "@thisisayande/freecode-shared";
 
 // SessionStore is resolved from the Effect runtime so the whole process shares
@@ -1659,6 +1665,31 @@ export const methodHandlers: Record<
       readConfig().current?.provider || fallbackProviderFromCredentials() || "";
     const store = await getSessionStore();
     return { sessionId: await importClaudeSession(store, sessionId, provider) };
+  },
+
+  // Codex CLI twin of the three Claude Code methods above (~/.codex, read-only).
+  "session.codexList": async (
+    params: Record<string, unknown>,
+  ): Promise<CodexSessionMeta[]> => {
+    const { limit } = params as { limit?: number };
+    return listCodexSessions({ limit });
+  },
+
+  "session.codexTranscript": async (
+    params: Record<string, unknown>,
+  ): Promise<ClaudeTranscript> => {
+    const { sessionId } = params as { sessionId: string };
+    return { sessionId, messages: await readCodexTranscript(sessionId) };
+  },
+
+  "session.codexImport": async (
+    params: Record<string, unknown>,
+  ): Promise<{ sessionId: string }> => {
+    const { sessionId } = params as { sessionId: string };
+    const provider =
+      readConfig().current?.provider || fallbackProviderFromCredentials() || "";
+    const store = await getSessionStore();
+    return { sessionId: await importCodexSession(store, sessionId, provider) };
   },
 
   "session.switch": async (params: Record<string, unknown>): Promise<void> => {

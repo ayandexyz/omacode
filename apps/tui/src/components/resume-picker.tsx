@@ -25,6 +25,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type {
   ClaudeSessionMeta,
+  CodexSessionMeta,
   SerializedMessage,
   SessionMeta,
 } from "@thisisayande/freecode-shared";
@@ -212,7 +213,13 @@ function renderScrollbar(
 // -----------------------------------------------------------------------------
 
 /** A tab identifies which session source the list + preview are showing. */
-export type ResumeTab = "freecode" | "claude-code";
+export type ResumeTab = "freecode" | "claude-code" | "codex";
+
+const TAB_LABELS: Record<ResumeTab, string> = {
+  freecode: "Freecode",
+  "claude-code": "Claude Code",
+  codex: "Codex",
+};
 
 export interface ResumePickerCallbacks {
   /**
@@ -225,7 +232,8 @@ export interface ResumePickerCallbacks {
   /**
    * Fires on Enter. The wiring layer dispatches by tab:
    *   - Freecode: resume + close.
-   *   - Claude Code: import into a FreeCode session (`cc_<id>`), then resume.
+   *   - Claude Code / Codex: import into a FreeCode session (`cc_<id>` /
+   *     `codex_<id>`), then resume.
    */
   onSelect: (sessionId: string, tab: ResumeTab) => void;
   /** Fires on Esc / Ctrl+C — wiring layer should close and refocus editor. */
@@ -247,7 +255,7 @@ export class ResumePicker implements Component {
   private readonly tabState: Record<
     ResumeTab,
     {
-      sessions: SessionMeta[] | ClaudeSessionMeta[];
+      sessions: SessionMeta[] | ClaudeSessionMeta[] | CodexSessionMeta[];
       cursor: number;
       listScroll: number;
       previews: Map<string, SerializedMessage[]>;
@@ -269,6 +277,7 @@ export class ResumePicker implements Component {
     freecodeSessions: SessionMeta[],
     claudeSessions: ClaudeSessionMeta[],
     private readonly callbacks: ResumePickerCallbacks,
+    codexSessions: CodexSessionMeta[] = [],
   ) {
     this.tabState = {
       freecode: {
@@ -285,6 +294,13 @@ export class ResumePicker implements Component {
         previews: new Map(),
         pendingPreview: null,
       },
+      codex: {
+        sessions: codexSessions,
+        cursor: 0,
+        listScroll: 0,
+        previews: new Map(),
+        pendingPreview: null,
+      },
     };
     this.markdown = new Markdown("", 0, 0, markdownTheme);
   }
@@ -296,6 +312,19 @@ export class ResumePicker implements Component {
 
   private get state() {
     return this.tabState[this.activeTab];
+  }
+
+  /** Tabs in strip order. Codex only shows up when it has sessions. */
+  private tabs(): ResumeTab[] {
+    return this.tabState.codex.sessions.length > 0
+      ? ["freecode", "claude-code", "codex"]
+      : ["freecode", "claude-code"];
+  }
+
+  private stepTab(delta: number): void {
+    const tabs = this.tabs();
+    const i = tabs.indexOf(this.activeTab) + delta;
+    if (i >= 0 && i < tabs.length) this.switchTab(tabs[i]!);
   }
 
   /**
@@ -341,9 +370,9 @@ export class ResumePicker implements Component {
 
   /** Total number of cached previews across both tabs (useful for tests). */
   cacheSize(): number {
-    return (
-      this.tabState.freecode.previews.size +
-      this.tabState["claude-code"].previews.size
+    return Object.values(this.tabState).reduce(
+      (n, t) => n + t.previews.size,
+      0,
     );
   }
 
@@ -431,7 +460,7 @@ export class ResumePicker implements Component {
    *
    * Routing rules:
    *  - `←` / `h` → swap to previous tab (no-op on Freecode; the left tab).
-   *  - `→` / `l` → swap to next tab (no-op on Claude Code; the right tab).
+   *  - `→` / `l` → swap to next tab (no-op on the rightmost tab).
    *  - `Tab` / `BackTab` → swap focus between list and preview (within tab).
    *  - `↑` / `k`:
    *      - list focus  → cursor -1 (wraps)
@@ -450,11 +479,11 @@ export class ResumePicker implements Component {
    */
   handleInput(data: string): void {
     if (matchesKey(data, Key.left) || data === "h") {
-      this.switchTab("freecode");
+      this.stepTab(-1);
       return;
     }
     if (matchesKey(data, Key.right) || data === "l") {
-      this.switchTab("claude-code");
+      this.stepTab(1);
       return;
     }
     if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))) {
@@ -659,15 +688,13 @@ export class ResumePicker implements Component {
    */
   private renderTabStrip(width: number): string {
     if (width < 12) return "";
-    const freecodeLabel = "Freecode";
-    const claudeLabel = "Claude Code";
-    // The strip is ` ◀ Claude Code ▶ ` at full size; smaller terminals drop
-    // the markers.
-    const isClaude = this.activeTab === "claude-code";
-    const freecode = isClaude ? DIM(freecodeLabel) : ACCENT("▎ " + freecodeLabel);
-    const claude = isClaude ? ACCENT("▎ " + claudeLabel) : DIM(claudeLabel);
+    // The strip is ` ◀ Freecode ▎ Claude Code ▶ ` at full size; smaller
+    // terminals drop the markers.
+    const labels = this.tabs().map((t) =>
+      t === this.activeTab ? ACCENT("▎ " + TAB_LABELS[t]) : DIM(TAB_LABELS[t]),
+    );
     const arrow = (ch: string) => (width >= 22 ? DIM(ch) : "");
-    return `${arrow("◀ ")}${freecode}${DIM(" ")}${claude}${arrow(" ▶")}`;
+    return `${arrow("◀ ")}${labels.join(DIM(" "))}${arrow(" ▶")}`;
   }
 
   private renderListColumn(width: number, height: number): string[] {
@@ -730,7 +757,7 @@ export class ResumePicker implements Component {
    * field the row renderer reads.
    */
   private renderSessionRow(
-    s: SessionMeta | ClaudeSessionMeta,
+    s: SessionMeta | ClaudeSessionMeta | CodexSessionMeta,
     isSel: boolean,
     rowIdx: number,
     width: number,
@@ -768,8 +795,8 @@ export class ResumePicker implements Component {
       text = "";
     } else if (tab.previews.has(id)) {
       text = transcriptToMarkdown(tab.previews.get(id)!);
-    } else if (this.activeTab === "claude-code" && tab.sessions.length === 0) {
-      text = "_No Claude Code sessions found._";
+    } else if (this.activeTab !== "freecode" && tab.sessions.length === 0) {
+      text = `_No ${TAB_LABELS[this.activeTab]} sessions found._`;
     } else {
       // Either racing with the async fetch or never fetched.
       text = "_loading preview…_";

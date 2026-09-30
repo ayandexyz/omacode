@@ -278,6 +278,11 @@ export interface ClaudeSessionMeta {
   fullPath: string;
 }
 
+/** One Codex CLI session (`~/.codex/sessions`), as `session.codexList` returns it. */
+export type CodexSessionMeta = Omit<ClaudeSessionMeta, "provider"> & {
+  provider: "codex";
+};
+
 /**
  * Wire shape of the `session.claudeTranscript` response. The transcript is
  * converted to `SerializedMessage[]` so the existing preview markdown

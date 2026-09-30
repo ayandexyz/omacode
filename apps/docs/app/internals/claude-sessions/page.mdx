@@ -24,3 +24,22 @@ FreeCode session (FreeCode never writes to `~/.claude`):
   were left out.
 - Project path comes from the transcript's `cwd`. The title comes from
   `customTitle`/`aiTitle`, falling back to the first prompt.
+
+## Codex sessions
+
+`apps/core/src/codex-sessions/` does the same for Codex CLI rollouts
+(`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl`, default `~/.codex`).
+They are exposed as `session.codexList`, `session.codexTranscript` and
+`session.codexImport`, and appear as a third **Codex** tab in `/resume`. The tab
+only shows when Codex sessions exist.
+
+- Imported as `codex_<id>`, once, with the same never-overwrite rule as Claude Code.
+- User turns come from `response_item` user messages. The blocks Codex injects
+  itself (`# AGENTS.md instructions`, `<environment_context>`, `<turn_aborted>`,
+  image tags) are removed.
+  Newer Codex versions no longer write `event_msg/user_message`, so that event is
+  not used.
+- `function_call` and `custom_tool_call` are written inline with their `*_output`, the
+  same way as Claude Code tool calls. Reasoning and developer messages are dropped.
+- The title comes from Codex's `session_index.jsonl` `thread_name`, falling back
+  to the first prompt.

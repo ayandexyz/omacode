@@ -17,6 +17,7 @@ import type {
   SessionResumeResult,
   SerializedMessage,
   ClaudeSessionMeta,
+  CodexSessionMeta,
   ClaudeTranscript,
   ContextBreakdown,
   ProviderInfo,
@@ -945,6 +946,26 @@ export async function sessionClaudeImport(
   sessionId: string,
 ): Promise<{ sessionId: string }> {
   return (await sendRequest("session.claudeImport", {
+    sessionId,
+  })) as { sessionId: string };
+}
+
+export async function sessionCodexList(): Promise<CodexSessionMeta[]> {
+  return (await sendRequest("session.codexList", {})) as CodexSessionMeta[];
+}
+
+export async function sessionCodexTranscript(
+  sessionId: string,
+): Promise<ClaudeTranscript> {
+  return (await sendRequest("session.codexTranscript", {
+    sessionId,
+  })) as ClaudeTranscript;
+}
+
+export async function sessionCodexImport(
+  sessionId: string,
+): Promise<{ sessionId: string }> {
+  return (await sendRequest("session.codexImport", {
     sessionId,
   })) as { sessionId: string };
 }

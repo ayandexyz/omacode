@@ -401,6 +401,19 @@ export const METHODS = {
     params: { sessionId: "" },
     result: {} as { sessionId: string },
   },
+  // Codex CLI (~/.codex/sessions) twins of the three Claude Code methods.
+  "session.codexList": {
+    params: {} as { limit?: number },
+    result: [] as import("../types.js").CodexSessionMeta[],
+  },
+  "session.codexTranscript": {
+    params: { sessionId: "" },
+    result: {} as import("../types.js").ClaudeTranscript,
+  },
+  "session.codexImport": {
+    params: { sessionId: "" },
+    result: {} as { sessionId: string },
+  },
   "providers.list": {
     // Omit `kind` for every provider; "api" for /model, "web" for /web.
     params: {} as { kind?: "api" | "web" } | undefined,
@@ -850,6 +863,9 @@ export const REQUIRED_PARAMS: Record<
   "session.claudeList": {},
   "session.claudeTranscript": { sessionId: "string" },
   "session.claudeImport": { sessionId: "string" },
+  "session.codexList": {},
+  "session.codexTranscript": { sessionId: "string" },
+  "session.codexImport": { sessionId: "string" },
   "providers.list": {},
   "config.setWebCredential": { provider: "string", credential: "object" },
   // projectPath is optional in both handlers (they fall back to the process
