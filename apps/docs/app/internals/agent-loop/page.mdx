@@ -17,9 +17,16 @@ The deal is simple and it repeats:
 
 If the model answers with plain text, the loop is done. If it asks for tools,
 the loop runs them, appends the results to the conversation, and asks again.
-That is the whole engine (`agent/loop.ts`). Everything else on this page is
-detail about how each of those steps is made cheap, safe, and hard to get stuck
-in.
+That is the whole engine (`agent/loop.ts`). In interview language, this is a
+**stateful tool-use (or ReAct-style) control loop**: the model reasons from the
+current context, chooses an action, observes the result, and repeats until it
+can return a final answer. FreeCode owns the control flow; the model never gets
+direct filesystem or shell access.
+
+Everything else on this page explains how that small loop is made **safe**
+(permissions and hooks), **reliable** (recovery and verification), **efficient**
+(prompt caching and compaction), and **observable** (events, rollout records,
+and usage).
 
 ## Vocabulary
 
@@ -29,14 +36,14 @@ mean different things, and the difference matters when reading the code.
 | Term | What it is | Where it lives |
 | --- | --- | --- |
 | **Session** | One conversation, persisted, resumable. Survives restarts. | `session/`, `store/` |
-| **Run** | One `run(UserInput)` call — everything that happens because of *one* user message. | `loop.ts:543` |
-| **Turn / iteration** | One provider call plus the tools it asked for. A run has many. | `loop.ts:1281` (`executeTurn`) |
+| **Run** | One `run(UserInput)` call — everything that happens because of *one* user message. | `loop.ts:774` |
+| **Turn / iteration** | One provider call plus the tools it asked for. A run has many. | `loop.ts:1750` (`executeTurn`) |
 | **Batch** | A group of tool calls from one turn that may execute concurrently. | `tools/batching.ts` |
 
 `turnCount` and `iterationCount` are both incremented in the same place and are
 always equal; the loop keeps both because `SessionState` predates the merge.
 
-A fresh `AgentLoop` is constructed for **every user message** (`server.ts:199`)
+A fresh `AgentLoop` is constructed for **every user message** (`server.ts:360`)
 and reloads history from the session store. So "per-run state" and "per-instance
 state" are the same thing on the interactive path — which is load-bearing in one
 place, and a bug in another (see [Known gaps](#known-gaps)).
@@ -44,6 +51,7 @@ place, and a bug in another (see [Known gaps](#known-gaps)).
 ## The shape of one run
 
 ```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 600, "nodeSpacing": 80, "rankSpacing": 80}} }%%
 flowchart TD
     Start(["run(UserInput)"]) --> Setup["1&gt; reset per-run state, start tree watcher, load permission rules
     2&gt; collect project context (frozen for the session)
@@ -54,8 +62,8 @@ flowchart TD
     Setup --> Cap{"iteration cap?"}
     Cap -- yes --> WrapUp["wrap-up reminder one turn early, then stop"]
     Cap -- no --> Health{"loop health?"}
-    Health -- warn/stop --> WrapUp
-    Health -- ok --> Nudge["1&gt; todo nudge? queue a system-reminder
+    Health -- stop --> WrapUp
+    Health -- warn/ok --> Nudge["1&gt; todo nudge? queue a system-reminder
     2&gt; TurnStart hook"]
 
     Nudge --> Turn["executeTurn:
@@ -71,22 +79,22 @@ flowchart TD
     Turn --> TurnEnd["TurnEnd hook, accumulate usage, spend circuit breaker"]
     TurnEnd --> ToolsCalled{"tools called?"}
     ToolsCalled -- yes --> Cap
-    ToolsCalled -- no --> Gates["1&gt; todo gate
+    ToolsCalled -- no --> Gates["1&gt; queued user steer?
     2&gt; verify gate
-    3&gt; verifier gate
-    (any gate may force another turn)"]
+    3&gt; independent verifier
+    4&gt; optional auto-poke for open todos"]
     Gates -- forces another turn --> Cap
     Gates -- clear --> Done["kick memory extraction (not awaited), return"]
     WrapUp --> Done
 
-    classDef steps text-align:left
+    classDef steps text-align:left,padding:24px
     class Setup,Nudge,Turn,Gates steps
 ```
 
 ## Before the first request
 
 `run()` starts by throwing away everything that belonged to the previous prompt
-(`loop.ts:543`). Loop-health counters in particular are per-run: carrying them
+(`loop.ts:774`). Loop-health counters in particular are per-run: carrying them
 forward would let one prompt's history stop the *next* prompt before it ever
 reached the provider.
 
@@ -123,30 +131,34 @@ to the hour for the same reason.
 ### 1. Build the request
 
 The system prompt is built as **blocks**, not one string, and the split is the
-whole point (`context/compiler.ts:137`):
+whole point (`context/compiler.ts:186`):
 
 | Block | `cache` | Contents | Changes |
 | --- | --- | --- | --- |
 | Static | `true` | base prompt, model identity, mode prompt, `CLAUDE.md`/`AGENTS.md`, skill list, memory guidance | never, within a session |
-| Session | `false` | compaction summary, retrieved memories, todo list, transient reminders | most turns |
+| Session | `false` | compaction summary | only when compaction runs |
 
-Session blocks sit at the tail of the array, after the cache breakpoint, so
-rewriting them costs nothing.
+The session block sits after the cache breakpoint. The more volatile pieces —
+retrieved memories, the todo list, and transient `<system-reminder>` text — are
+instead appended as a final, request-scoped **ephemeral tail** user message.
+That placement matters: changing a todo must not invalidate the cached system
+prompt and the entire conversation before it.
 
 The **dynamic context** — tree, git HEAD, clock — is not a system block at all.
 It is inlined as the conversation's first *user* message with a fixed id and
-`timestamp: 0` (`loop.ts:1672`). Claude Code splits at the same boundary for the
+`timestamp: 0` (`loop.ts:2404`). Claude Code splits at the same boundary for the
 same reason.
 
 Two things reach the model here that are easy to miss:
 
-- **Retrieved memories** (`memGraph.prepareMemories`, `loop.ts:1281`) are asked
+- **Retrieved memories** (`memGraph.prepareMemories`, `loop.ts:1750`) are asked
   for on *every* turn, not just when the user speaks. Warm turns return the
   previous set instantly; a cold-start retrieval that lands just after the loop
   stopped waiting still gets injected on the next inner turn instead of being
   lost for the rest of the request.
-- **Reminders** (`agent/reminders.ts`) are `<system-reminder>` blocks queued by
-  the gates below, drained into exactly one turn, and never persisted to history.
+- **Reminders** (`agent/reminders.ts`) are `<system-reminder>` text queued by
+  nudges or completion gates, delivered in exactly one ephemeral tail, and
+  never persisted to history.
 
 Finally the `UserPromptSubmit` hook sees the joined system text and may rewrite
 it. A rewrite is re-split back into static + session blocks by
@@ -156,7 +168,7 @@ cache invalidation so later analysis reports it as explained rather than as a bu
 
 ### 2. Prune, then send
 
-Before the messages go out, `pruneHistoryToolResults` (`loop.ts:422`) replaces
+Before the messages go out, `pruneHistoryToolResults` (`loop.ts:672`) replaces
 the largest tool results with a short marker until the model-visible total is
 under `TOOL_RESULT_BUDGET_CHARS` (200,000 by default).
 
@@ -190,7 +202,7 @@ flowchart TD
 ```
 
 `callProviderOnce` writes `model.request` to the rollout log **before** the call
-(`loop.ts:1720`). That asymmetry is the diagnostic: a request with no matching
+(`loop.ts:2467`). That asymmetry is the diagnostic: a request with no matching
 response or error *is* what a hang looks like in the log. Timeouts themselves
 live at the fetch layer (`providers/fetch-timeout.ts`), never around the chunk
 iterator — bounding silence between normalized chunks kills long tool-argument
@@ -218,7 +230,7 @@ everything is exhausted the chain fails with a message that says what to do
 (top up, or configure `recovery.fallbackProviders`) and deliberately drops the
 SDK error object, which carries the entire conversation on `requestBodyValues`.
 
-Context overflow is handled one level up, in `compactAndRetry` (`loop.ts:996`):
+Context overflow is handled one level up, in `compactAndRetry` (`loop.ts:1430`):
 compact, send once more, and do **not** re-wrap the retry. A second overflow in
 one turn means compaction isn't converging, and the cap is
 `MAX_OVERFLOW_COMPACTIONS = 3`. See [Compaction](/internals/compaction).
@@ -226,7 +238,7 @@ one turn means compaction isn't converging, and the cap is
 ### 4. Read the answer
 
 Tool calls come back natively from the provider. If there are none, the text is
-scanned for a `[TOOL_CALLS]…[/TOOL_CALLS]` block (`loop.ts:1959`) — a fallback
+scanned for a `[TOOL_CALLS]…[/TOOL_CALLS]` block (`loop.ts:2912`) — a fallback
 for providers and mocks without native tool calling.
 
 An assistant `Message` is assembled from the text plus one `tool` part per call
@@ -245,7 +257,7 @@ guarantees around writes, edits, and shell commands hold. Post-processing is
 always in the original order, so results are deterministic regardless of who
 finished first.
 
-Every single call goes through the same gauntlet (`loop.ts:2045`):
+Every single call goes through the same gauntlet (`loop.ts:2967`):
 
 ```mermaid
 flowchart TD
@@ -283,15 +295,23 @@ would break the tool_use/tool_result pairing that providers require.
 
 ## Deciding to stop
 
-"No tool calls" means the model wants to stop. It is not, by itself, enough.
-Three gates run in order, and any one of them can force another turn
-(`loop.ts:831`).
+"No tool calls" means the model wants to stop. It is not always the final
+decision: the loop runs the following completion checks in order. A failed
+check can add a reminder and force one more model turn; every forced path is
+capped so a broken project cannot loop forever.
 
 | Gate | Fires when | Cap | What it injects |
 | --- | --- | --- | --- |
-| **Todo** | the todo list still has `pending` / `in_progress` items | 3 per run | a reminder listing the unfinished items |
+| **Steer** | the user sent a correction while the agent was working | — | the queued user message |
 | **Verify** | this run mutated files and the project has a typecheck/build script | 2 per run | the failing output |
 | **Verifier** | this run touched ≥ 3 distinct files | 2 per run | the verifier's findings, on `FAIL` |
+| **Auto-poke** | todos remain open **and** `signals.autoPoke.enabled` is on | configured, default off | a reminder to reassess the remaining plan |
+
+Open todos do **not** normally override a final answer. That is deliberate: a
+planning request can correctly leave every todo pending, and automatically
+continuing would turn a requested plan into unsolicited implementation. The
+optional auto-poke is fingerprinted and capped so it cannot repeatedly revive
+the same unfinished plan.
 
 **Verify** (`agent/verify.ts`) resolves a command from `package.json` scripts, in
 priority order `typecheck`, `type-check`, `check-types`, `check`, `build`. Tests
@@ -299,7 +319,7 @@ are deliberately excluded — slow and flaky — and stay the model's job via th
 prompt. No script, no gate; there is no guessing. The run is capped at 120
 seconds and 4,000 chars of captured output.
 
-**Verifier** (`agent/subagent.ts:164`) spawns an independent read-only subagent
+**Verifier** (`agent/subagent.ts:236`) spawns an independent read-only subagent
 in explore mode that must end its final message with
 `VERDICT: PASS | FAIL | PARTIAL`. A missing or garbled verdict parses as
 `PARTIAL`, never a false `PASS`. Its prompt spends most of its length preventing
@@ -309,16 +329,15 @@ grounds for `FAIL` unless they were the request, and on a re-check the bar
 does not rise between rounds.
 
 Once the gates are satisfied, the loop kicks memory extraction **without
-awaiting it** (`loop.ts:936`) and returns. The user's answer arrives now;
+awaiting it** (`loop.ts:1645`) and returns. The user's answer arrives now;
 mining the transcript for durable memories finishes behind it, and can never
 turn into a task failure. See [Memory](/internals/memory).
 
 ## Loop health
 
-The loop watches for three stuck patterns — two while tools execute
-(`updateLoopHealth`, `loop.ts:2440`), one at the end of each turn
-(`advanceStagnation`, `loop.ts:2498`) — and checks the verdict at the top of the
-next turn. The verdict itself comes from one shared evaluator,
+The loop watches for four stuck patterns. Tool calls update repetition and
+edit-revert history; each completed turn updates stagnation and reasoning
+similarity. The verdict is checked at the top of the next turn by one shared evaluator,
 `createLoopHealthEvaluator` (`effect/loop-health.ts`); the loop holds no second
 copy of the policy.
 
@@ -341,6 +360,12 @@ cycle. `oscillationScore` is a count of the reverts *still inside that window*
 pushes the scored pair out — one edit/revert pair no longer leaves the counter
 armed for the rest of the session.
 
+**D. Repeated reasoning.** Consecutive thinking blocks are compared with
+word-set **Jaccard similarity**. At the default 0.9 similarity threshold,
+three near-identical reasoning turns signal that the model is reconsidering
+the same idea rather than making progress. This is intentionally a cheap,
+deterministic heuristic — no embedding or extra model call is needed.
+
 Braking is two-tier: the first breach only warns, and a hard stop is reserved
 for **twice** the threshold.
 
@@ -349,6 +374,7 @@ for **twice** the threshold.
 | `repeatedIdenticalThreshold` | 3 | 3 | 6 |
 | `stagnantTurnsThreshold` | 5 | 5 | never |
 | `oscillationScoreThreshold` | 4 | 4 | 8 |
+| `reasoningSimilarityTurns` | 3 | 3 similar turns | 6 similar turns |
 | `totalIterationLimit` | `Infinity` | — | never |
 
 A stop ends the run with `Loop stopped: <reason>`, runs the `Stop` hook, and
@@ -356,11 +382,12 @@ preserves everything — history is already persisted turn by turn.
 
 ## Trajectory redirection
 
-A `warn` on its own goes to `logger.debug` and reaches nobody — the loop keeps
-funding the circle until it is twice as bad, then kills the run. Redirection is
-what makes the warn tier useful: on a warning, fold the rollout log into a
-bounded evidence packet, make **one** small model call asking for up to three
-materially different next directions, and push them into the next turn as a
+A `warn` is an early intervention, not an immediate cancellation. For repeated
+identical tool calls, FreeCode always queues one plain reminder naming the
+pattern. Trajectory redirection is the richer optional intervention: on a
+warning, it folds the rollout log into a
+bounded evidence packet, makes **one** small model call asking for up to three
+materially different next directions, and pushes them into the next turn as a
 `<system-reminder>` — the same mechanism the todo nudge already uses.
 
 It is **off by default**. Turn it on per project or per user:
@@ -374,7 +401,8 @@ It is **off by default**. Turn it on per project or per user:
 `FREECODE_DISABLE_MEMORY_*` convention.
 
 **What can trigger it.** Only a `warn`, and only for `repeated_identical_tool`,
-`oscillation_detected` or `no_progress`. Never a `stop`: at that point the run
+`oscillation_detected` or `no_progress`. Repeated reasoning is detected and can
+warn or stop the loop, but is intentionally not yet a redirect trigger. Never a `stop`: at that point the run
 is over and the honest answer is to hand back to the user, not to spend more
 money re-planning a corpse. `max_iterations_reached` is a budget rather than a
 pathology, and `wrapUpReminder()` already covers it.
@@ -423,7 +451,7 @@ capped run hands back a real summary rather than being truncated mid-task, and
 the returned text is the model's own last response with a note appended.
 
 **Spend.** `FREECODE_MAX_TURN_TOKENS` is an opt-in circuit breaker on
-`input + output` tokens across the run (`loop.ts:812`). Loop-health only warns
+`input + output` tokens across the run (`loop.ts:1195`). Loop-health only warns
 on a stuck pattern; nothing else caps actual money.
 
 **Interrupt.** `interrupt()` flips status to `stopped` and aborts the
@@ -467,8 +495,9 @@ a warning, because it means something mutated an already-sent message.
 | `repeatedIdenticalThreshold` | 3 | identical-call warn threshold (stop at 2×) |
 | `stagnantTurnsThreshold` | 5 | no-progress warn threshold, in turns |
 | `oscillationScoreThreshold` | 4 | revert-cycle warn threshold (stop at 2×) |
-| `TODO_NUDGE_TURNS` / `TODO_NUDGE_GAP` | 3 / 5 | when to nudge the model to keep a plan |
-| `TODO_GATE_MAX_FORCES` | 3 | forced continues for unfinished todos |
+| `reasoningSimilarityThreshold` / `reasoningSimilarityTurns` | 0.9 / 3 | near-duplicate thinking detection |
+| `TODO_NUDGE_TURNS` / `TODO_NUDGE_GAP` | 10 / 10 | when to nudge the model to maintain a plan (`FREECODE_TODO_NUDGE=legacy` restores 3 / 5) |
+| `signals.autoPoke.enabled` | `false` | whether open todos may request a capped follow-up turn |
 | `MAX_VERIFY_ATTEMPTS` | 2 | typecheck/build gate retries |
 | `VERIFIER_MIN_FILES` / `MAX_VERIFIER_ATTEMPTS` | 3 / 2 | when the adversarial verifier runs, and how often |
 | `MAX_OVERFLOW_COMPACTIONS` | 3 | compact-and-retry attempts per run |
@@ -481,14 +510,12 @@ a restart — unlike the compaction variables, which are read per call.
 
 ## Known gaps
 
-1. **A loop-health `warn` reaches nobody unless redirection is switched on.**
-   [Trajectory redirection](#trajectory-redirection) is what acts on a warning,
-   and it is off by default until the measurement in §9 of its spec says
-   otherwise. With it off, a `warn` is still just `logger.debug` (`loop.ts:737`)
-   and nothing happens until the pattern doubles into a `stop`. The trigger
-   itself is recorded either way (`redirect.skipped`, reason `disabled`, once
-   per run), which is how the flip decision gets its evidence.
-2. **The spend circuit breaker is off by default** (`loop.ts:812`,
+1. **Rich loop-health redirection is off by default.** A repeated identical
+   tool call still receives one built-in reminder, but warnings for stagnation,
+   oscillation, and repeated reasoning have no model-directed intervention
+   unless [trajectory redirection](#trajectory-redirection) is enabled.
+   Repeated reasoning is also not yet one of redirection's evidence triggers.
+2. **The spend circuit breaker is off by default** (`loop.ts:1195`,
    `compaction/tokens.ts:105`). `FREECODE_MAX_TURN_TOKENS` is unset unless the
    user sets it, so nothing caps actual spend. `freecode run` has `--max-turns`
    for a turn cap, but nothing caps tokens by default, and loop-health only
@@ -515,7 +542,7 @@ however, wired into trajectory redirection's trigger list — see gap 1).
 | Revert detection and the oscillation window | `apps/core/src/agent/oscillation.ts` |
 | The loop-health policy (the only copy) | `apps/core/src/effect/loop-health.ts` |
 | Redirection: caps, evidence, prompt, supervisor | `apps/core/src/agent/redirect/` |
-| Todo nudge / gate / wrap-up text | `apps/core/src/agent/reminders.ts` |
+| Todo nudge / auto-poke / wrap-up text | `apps/core/src/agent/reminders.ts`, `apps/core/src/agent/signals/` |
 | The typecheck/build gate | `apps/core/src/agent/verify.ts` |
 | The adversarial verifier + subagents | `apps/core/src/agent/subagent.ts` |
 | Cache-stable tool-result pruning | `apps/core/src/agent/prune-state.ts` |
