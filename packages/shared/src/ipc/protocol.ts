@@ -395,6 +395,12 @@ export const METHODS = {
     params: { sessionId: "" },
     result: {} as import("../types.js").ClaudeTranscript,
   },
+  // Imports a Claude Code session into a FreeCode session (`cc_<id>`),
+  // idempotently, and returns its id for session.resume.
+  "session.claudeImport": {
+    params: { sessionId: "" },
+    result: {} as { sessionId: string },
+  },
   "providers.list": {
     // Omit `kind` for every provider; "api" for /model, "web" for /web.
     params: {} as { kind?: "api" | "web" } | undefined,
@@ -843,6 +849,7 @@ export const REQUIRED_PARAMS: Record<
   "session.resume": { sessionId: "string" },
   "session.claudeList": {},
   "session.claudeTranscript": { sessionId: "string" },
+  "session.claudeImport": { sessionId: "string" },
   "providers.list": {},
   "config.setWebCredential": { provider: "string", credential: "object" },
   // projectPath is optional in both handlers (they fall back to the process

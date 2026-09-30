@@ -15,3 +15,9 @@ export {
   type ClaudeListOptions,
   type ClaudeTranscriptOptions,
 } from "./scanner.js";
+
+export {
+  importClaudeSession,
+  importedSessionId,
+  convertClaudeTranscript,
+} from "./import.js";

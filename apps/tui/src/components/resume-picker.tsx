@@ -225,7 +225,7 @@ export interface ResumePickerCallbacks {
   /**
    * Fires on Enter. The wiring layer dispatches by tab:
    *   - Freecode: resume + close.
-   *   - Claude Code: show a "coming soon" message; the modal stays open.
+   *   - Claude Code: import into a FreeCode session (`cc_<id>`), then resume.
    */
   onSelect: (sessionId: string, tab: ResumeTab) => void;
   /** Fires on Esc / Ctrl+C — wiring layer should close and refocus editor. */

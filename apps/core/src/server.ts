@@ -132,6 +132,7 @@ import { existsSync } from "fs";
 import {
   listClaudeSessions,
   readClaudeTranscript,
+  importClaudeSession,
 } from "./claude-sessions/index.js";
 import type {
   ClaudeSessionMeta,
@@ -1645,6 +1646,19 @@ export const methodHandlers: Record<
     const { sessionId } = params as { sessionId: string };
     const messages = await readClaudeTranscript(sessionId);
     return { sessionId, messages };
+  },
+
+  // Copies a Claude Code session into the FreeCode store (once — a second
+  // call returns the same `cc_<id>` session with any turns added since) and
+  // returns its id; the frontend then calls session.resume on it.
+  "session.claudeImport": async (
+    params: Record<string, unknown>,
+  ): Promise<{ sessionId: string }> => {
+    const { sessionId } = params as { sessionId: string };
+    const provider =
+      readConfig().current?.provider || fallbackProviderFromCredentials() || "";
+    const store = await getSessionStore();
+    return { sessionId: await importClaudeSession(store, sessionId, provider) };
   },
 
   "session.switch": async (params: Record<string, unknown>): Promise<void> => {

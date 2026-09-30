@@ -345,7 +345,7 @@ export async function readClaudeTranscript(
  * only a sessionId (the resume picker will preview one session at a time,
  * so the worst case is one scan per Enter / preview fetch).
  */
-async function resolveTranscriptPath(
+export async function resolveTranscriptPath(
   sessionId: string,
   opts: ClaudeTranscriptOptions,
 ): Promise<string | null> {

@@ -5,5 +5,22 @@ description: "Importing Claude Code sessions/transcripts into FreeCode."
 
 # Claude Code session import
 
-Stub — not yet written. Lives in `apps/core/src/claude-sessions/`. Exposed over
-IPC via `session.claudeList` / `session.claudeTranscript`.
+Lives in `apps/core/src/claude-sessions/`. `/resume` has a Claude Code tab fed
+by `session.claudeList` (rows) and `session.claudeTranscript` (preview).
+Enter on that tab calls `session.claudeImport`, then `session.resume` on the
+returned id.
+
+Import (`import.ts`) copies `~/.claude/projects/<slug>/<id>.jsonl` into a
+FreeCode session (FreeCode never writes to `~/.claude`):
+
+- **Stable id `cc_<claude-id>`.** Importing again returns the existing session,
+  including any turns added in FreeCode. It is never re-imported over.
+- **Text only.** Claude Code's tool names and arguments are not FreeCode's, so
+  each `tool_use` is written inline as `[Claude Code tool call: Name {args}]`
+  followed by its `tool_result`, both capped at 2000 characters. Thinking, images,
+  `isMeta` and sidechain entries are dropped. Consecutive messages with the same
+  role are merged.
+- **Last 160 messages.** Older ones are replaced by a single note saying how many
+  were left out.
+- Project path comes from the transcript's `cwd`. The title comes from
+  `customTitle`/`aiTitle`, falling back to the first prompt.

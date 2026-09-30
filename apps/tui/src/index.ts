@@ -71,6 +71,7 @@ import {
   sessionResume,
   sessionClaudeList,
   sessionClaudeTranscript,
+  sessionClaudeImport,
   listProviders,
   listModels,
   listCommands,
@@ -1749,20 +1750,18 @@ async function showResumePicker(): Promise<void> {
         ensurePreview(sessionId, tab);
       },
       onSelect: async (sessionId: string, tab) => {
-        if (tab === "claude-code") {
-          // Tab is read-only for this iteration — surface a stub message and
-          // leave the modal open so the user can keep browsing. The actual
-          // import-and-resume flow is a follow-up PR.
-          showMessage(
-            "**Importing Claude Code sessions is coming soon.** Press Esc to close the picker.",
-          );
-          tui.requestRender();
-          return;
-        }
         hideResumeSelector();
-        showMessage(`**Resuming session...**`);
+        showMessage(
+          tab === "claude-code"
+            ? `**Importing Claude Code session...**`
+            : `**Resuming session...**`,
+        );
         try {
-          const result = await sessionResume(sessionId);
+          const freecodeId =
+            tab === "claude-code"
+              ? (await sessionClaudeImport(sessionId)).sessionId
+              : sessionId;
+          const result = await sessionResume(freecodeId);
           currentSession = { sessionId: result.sessionId };
           resetSessionCacheTotals();
           resetSessionPanels();

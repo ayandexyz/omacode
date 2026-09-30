@@ -941,6 +941,14 @@ export async function sessionClaudeTranscript(
   })) as ClaudeTranscript;
 }
 
+export async function sessionClaudeImport(
+  sessionId: string,
+): Promise<{ sessionId: string }> {
+  return (await sendRequest("session.claudeImport", {
+    sessionId,
+  })) as { sessionId: string };
+}
+
 // =============================================================================
 // MCP Methods
 // =============================================================================
