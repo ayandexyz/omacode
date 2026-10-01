@@ -1,19 +1,196 @@
 ---
-title: "Sessions"
-description: "Resume, fork, export, and share conversations."
+title: "Sessions, branches & rewind"
+description: "Resume work, explore a different direction, and safely undo a turn's files and conversation."
 ---
 
-# Sessions
+# Sessions, branches & rewind
 
-Sessions are durable. Every turn is recorded as an event log alongside the thread
-store, which is what makes resuming, forking a conversation at a point in time,
-and exporting a session for someone else possible.
+A FreeCode session is a durable conversation for one project. It keeps your
+messages, the agent's replies, and tool activity so you can stop work and pick
+up where you left off later.
 
-## On this page (coming soon)
+The simplest workflow is: start work, stop whenever you need to, then use
+`/resume` to continue the same session. FreeCode restores the conversation and
+its saved provider/model choice, so continuing does not silently switch to a
+different model.
 
-- Listing and resuming with `/resume` and `freecode session list`
-- Forking a session to try a different approach
-- Export / import, upload / download
-- Archiving and deleting
-- Where sessions are stored (sqlite, json, or remote)
-- Importing existing Claude Code sessions
+## Resume a previous session
+
+In the terminal UI, run:
+
+```text
+/resume
+```
+
+Choose a session and continue typing. If the prior turn was interrupted with
+Ctrl+C, FreeCode marks it as interrupted and, on resume, asks the agent to
+continue rather than pretending the unfinished answer completed.
+
+From a shell, list session IDs with:
+
+```bash
+freecode session list
+freecode session list --project /path/to/project
+```
+
+The command-line session manager currently supports listing and deleting.
+Resuming, forking, branching, exporting, and rewinding are available through
+the terminal UI (and the backend API).
+
+## Fork vs. branch: which should I use?
+
+Use a **fork** when you want a completely separate copy of the conversation.
+Use a **branch** when you want to revisit an earlier point within the same
+session.
+
+```text
+Original session                 Session tree
+────────────────                 ────────────
+/fork                            /tree
+new independent session          one session, two possible histories
+
+Try a risky refactor             Reconsider the last few turns
+Keep both approaches             Keep the old path available for review
+```
+
+### Fork a session
+
+Run `/fork` in the terminal UI. FreeCode copies the current conversation into a
+new session. From then on, the two sessions are independent: changes to one
+conversation do not change the other.
+
+This is the safest choice when you want to compare two approaches over many
+turns—for example, “rewrite this module” versus “make the smallest repair.”
+
+### Branch inside a session
+
+Run:
+
+```text
+/tree
+```
+
+The picker shows conversation entries, with the active path marked. Choose an
+earlier entry to make it the new point of continuation. The newer path is set
+aside rather than immediately erased, and FreeCode can summarize it for the
+new active path.
+
+`/tree` changes **only the conversation**. It does not alter files on disk.
+That distinction is intentional: changing what the model remembers should not
+silently rewrite your working tree.
+
+## Rewind a turn's files and conversation
+
+Use `/rewind` when you want to undo both the agent's work on disk and the
+conversation that led to it.
+
+```text
+/rewind
+  → choose a checkpoint
+  → inspect the file preview
+  → choose what to restore
+```
+
+Before every normal user turn, FreeCode takes a best-effort checkpoint of the
+project's working tree. A checkpoint is associated with that conversation
+entry, so rewinding to it can make the files and conversation agree again.
+
+For example:
+
+```text
+1. You: "Refactor the parser."
+2. Agent: edits parser.ts and adds parser.test.ts
+3. You: "/rewind" and select step 1
+4. Preview: parser.ts will be restored; parser.test.ts will be deleted
+5. Confirm: files return to their earlier state and the conversation returns
+   to before the refactor request.
+```
+
+The preview is mandatory. Nothing is written until you choose an action:
+
+| Choice | Effect |
+| --- | --- |
+| Restore files and rewind conversation | The usual undo: restore the listed paths, then continue from the earlier conversation point. |
+| Restore files only | Put files back, but keep the current conversation. Useful when you want the model to remember what it tried. |
+| Rewind conversation only | Same effect as choosing a point in `/tree`; leave the working tree untouched. |
+| Cancel | Make no changes. |
+
+### Important safety warning
+
+Rewind compares the selected checkpoint with the **current** tree. It cannot
+yet tell an agent edit from a file you edited manually after the checkpoint.
+If both changed `parser.ts`, restoring that checkpoint restores the old
+`parser.ts` and overwrites your manual change too.
+
+Always read the preview. If it includes a file with work you want to keep,
+cancel and commit, stash, copy, or otherwise save that work first. Rewind does
+not merge changes and has no conflict-resolution step.
+
+## What checkpoints include
+
+Checkpoints use a private “shadow” Git repository under `~/.freecode/snapshots/`.
+They do **not** change your project's Git branch, index, stash, history, or
+`git status`.
+
+They require the project itself to be a Git repository. In a non-Git project,
+FreeCode leaves checkpoints inactive rather than trying to snapshot everything
+in the directory. Untracked files larger than 2 MiB are skipped to avoid
+capturing build artifacts or crash dumps; the preview identifies them as skipped
+and they cannot be restored by rewind.
+
+Checkpoints are on by default. Configure them in `~/.freecode/config.json`:
+
+```jsonc
+{
+  "checkpoints": {
+    "enabled": true,
+    "maxPerSession": 100
+  }
+}
+```
+
+`FREECODE_CHECKPOINTS=0` disables capture for one environment; `1` forces it
+on when the project is eligible. Inspect or prune snapshot storage with:
+
+```bash
+freecode checkpoint status
+freecode checkpoint gc
+```
+
+`gc` discards every stored snapshot, so `/rewind` can no longer restore them.
+
+## Archive, delete, and share
+
+Archive keeps a session but removes it from normal active-session lists.
+Deleting through the backend is normally a recoverable status change; a purge
+removes the session's stored files. The CLI command below uses its separate
+purge path, so treat it as permanent:
+
+```bash
+freecode session delete <session-id>
+```
+
+Session export and import are explicit actions—FreeCode never synchronizes a
+conversation automatically. That matters because a transcript can contain file
+contents and command output from your machine. Review where an exported session
+will go before uploading or sharing it.
+
+## Where session data lives
+
+Session records live outside the project under `~/.freecode/`, so they survive
+project cleanup and do not create files in your repository:
+
+```text
+~/.freecode/
+├── sessions/<project>/<session-id>/
+│   ├── meta.json          session title, model, status
+│   ├── messages.jsonl     conversation used to resume
+│   ├── todos.json         task list for the session
+│   └── checkpoints.json   links between turns and snapshots
+├── snapshots/             private Git data for rewind
+└── rollout/sessions/      append-only activity record for tracing
+```
+
+For the underlying data model, compaction behavior, and session API, see
+[Sessions, store & rollout](/internals/sessions). For diagnosing an agent run,
+see [Tracing & observability](/guides/tracing).
