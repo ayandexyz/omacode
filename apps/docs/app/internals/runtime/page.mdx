@@ -1,31 +1,47 @@
 ---
 title: "Effect runtime & DI"
-description: "Layers, services, and loop health."
+description: "How FreeCode supplies the agent loop with real services in production and safe replacements in tests."
 ---
 
 # Effect runtime & DI
 
-Core is wired with [Effect](https://effect.website): services are declared as
-context tags and composed into layers, so the loop depends on interfaces
-rather than concrete modules. That is what makes the store, the provider, and
-the memory backend swappable in tests — a test suite hands the runtime an
-in-memory layer instead of the real one, and nothing else in the loop notices.
+FreeCode uses [Effect](https://effect.website) for part of its dependency
+wiring. In plain English: code says what it needs—a session store, hooks,
+memory, and so on—and one central place chooses the real version in production
+or a safe replacement in a test.
 
-## The three files
+Think of a coffee machine. The machine needs “water,” not a particular tap. In
+the same way, the agent loop needs “a session store,” not a hard-coded file on
+your laptop. This is **dependency injection (DI)**: dependencies are supplied
+from outside instead of being constructed invisibly inside the consumer.
 
-The whole system is three small files in `apps/core/src/effect/`:
+```text
+Agent loop asks for SessionStoreTag
+              ↓
+Live layer     → ~/.freecode session files
+Test layer     → a temporary test directory
+```
 
-- **`context.ts`** — declares every service as a `Context.Tag`. This is just a
-  name and a type, no implementation.
-- **`layers.ts`** — provides two competing implementations for those tags:
-  `AppLayerLive` (real services, talks to disk/network) and `makeTestLayer()`
-  (in-memory, no side effects).
-- **`runtime.ts`** — builds a `ManagedRuntime` from a layer and hands out a
-  singleton (`getAppRuntime()`) that `server.ts` and `cli.ts` both call.
+The benefit is practical: tests can exercise a real agent loop without writing
+to your real sessions. This is a focused DI boundary, not a claim that every
+module in FreeCode has been converted to Effect.
 
-## Context tags
+## The four files
 
-A tag is just an identity for a service — it carries no logic of its own:
+The implementation lives in `apps/core/src/effect/`:
+
+| File | Job |
+| --- | --- |
+| `context.ts` | names the services the runtime can supply |
+| `layers.ts` | connects those names to live or test implementations |
+| `runtime.ts` | creates, shares, and disposes a runtime |
+| `loop-health.ts` | contains the pure policy for detecting a likely stuck loop |
+
+## Tags: names for dependencies
+
+A **context tag** is a typed label for one service. It contains no business
+logic; it simply says, “when something asks for this label, give it a value
+that matches this contract.”
 
 ```ts
 export class SessionStoreTag extends Context.Tag("freecode/SessionStore")<
@@ -34,99 +50,141 @@ export class SessionStoreTag extends Context.Tag("freecode/SessionStore")<
 >() {}
 ```
 
-`apps/core/src/effect/context.ts` declares one tag per service: `HookRuntimeTag`,
-`ToolOrchestratorTag`, `SessionStoreTag`, `BusTag`, `ProviderRegistryTag`,
-`MemoryFactoryTag`, `RecorderFactoryTag`, `SessionManagerTag`, and
-`RecoveryManagerTag`. Code that needs the session store never imports
-`session/store.js` directly — it asks the runtime for `SessionStoreTag` and
-gets back whatever layer is currently providing it.
+`context.ts` defines nine tags:
 
-Two services are declared as **factories** rather than singletons —
-`MemoryFactoryTag` and `RecorderFactoryTag`. Memory and rollout recording are
-per-session state, so the DI graph owns the *recipe* for building one
-(`forSession(sessionId)`) instead of a single shared instance.
+- `HookRuntimeTag`
+- `ToolOrchestratorTag`
+- `SessionStoreTag`
+- `BusTag`
+- `ProviderRegistryTag`
+- `MemoryFactoryTag`
+- `RecorderFactoryTag`
+- `SessionManagerTag`
+- `RecoveryManagerTag`
 
-## Layers: Live vs. Test
+Two are **factories**, not shared objects. `MemoryFactoryTag` and
+`RecorderFactoryTag` create state for a particular session with
+`forSession(sessionId)`. That prevents one conversation's memory or audit
+recorder from being reused by another conversation.
 
-`apps/core/src/effect/layers.ts` is the composition root. Each tag gets a Live
-implementation built from the real modules:
+The agent-loop Effect directly resolves hooks, tool orchestration, session
+storage, memory factory, recorder factory, and recovery manager. The DI
+migration is deliberately partial: `ProviderRegistryTag` is wired but has no
+live agent-loop consumer yet; provider lookup still uses `getProvider()`.
 
-```ts
-export const BusLive = Layer.succeed(BusTag, bus);
+## Layers: which implementation should we use?
 
-export const SessionStoreLive = Layer.effect(
-  SessionStoreTag,
-  Effect.promise(() => createSessionStore(SESSION_BASE_DIR)),
-);
+A **layer** is the wiring recipe for a service. `layers.ts` is the
+**composition root**—the one place that answers “which implementation does the
+application use?”
+
+```text
+                 SessionStoreTag
+                        ↑
+AppLayerLive ───────────┘  real files under ~/.freecode
+makeTestLayer() ─────────  temporary directory for a test
 ```
 
-`AppLayerLive` merges all nine Live layers into one graph — this is what
-`getAppRuntime()` boots in production. Layers are memoized by reference, so a
-layer depended on twice (e.g. `SessionStoreLive` underlies both
-`SessionStoreTag` and `SessionManagerTag`) is still only built once.
+`AppLayerLive` merges the nine live services. It creates real hooks, tool
+orchestration, session persistence, memory factories, recorders, and recovery
+configuration. A layer reused by reference is **memoized**, meaning it is built
+once even if several services need it. For example, one session-store layer
+serves both `SessionStoreTag` and `SessionManagerTag`.
 
-`makeTestLayer(overrides)` builds the same nine-tag graph but with disk and
-network side effects removed by default: an in-memory `MemoryStorage` instead
-of `~/.freecode-memory`, a rollout recorder with `enabled: false` so tests
-never write to `~/.freecode`, and a session store rooted in a temp directory.
-Any single service can be swapped in for a real test double via the
-`overrides` argument, without touching the rest of the graph.
+`makeTestLayer(overrides)` creates the same shape but makes risky parts safe:
 
-## The runtime entry point
+- sessions use a temporary directory;
+- memory uses in-memory storage;
+- rollout recording is disabled, so tests do not write to `~/.freecode`; and
+- tests can replace individual services through `overrides`.
 
-`apps/core/src/effect/runtime.ts` turns a layer into something callable:
+That replacement is a **test double**: a controlled substitute, such as an
+in-memory store or fake provider, that lets a test isolate one behavior.
+
+## Runtime: using the layer
+
+`runtime.ts` turns a complete layer into an Effect `ManagedRuntime`.
 
 ```ts
 export function getAppRuntime(): AppRuntime {
-  if (!appRuntime) {
-    appRuntime = ManagedRuntime.make(AppLayerLive);
-  }
+  if (!appRuntime) appRuntime = ManagedRuntime.make(AppLayerLive);
   return appRuntime;
 }
 ```
 
-Server code resolves a service by running an effect against this runtime
-(`getAppRuntime().runPromise(...)`) rather than importing a module-level
-singleton. `makeRuntime(layer)` is the same construction exposed for tests, so
-a test can build a runtime from `makeTestLayer()` and exercise the exact same
-composition path production uses — only the layer underneath differs.
+The live runtime is lazy and shared: it is created on first use, then reused by
+server, CLI, eval, and autonomous-run entry points. Code runs an Effect through
+it with `runPromise(...)`.
 
-`disposeAppRuntime()` tears the singleton down; tests call it in `afterEach`
-so one test's runtime never leaks into the next.
+Tests use `makeRuntime(makeTestLayer(...))`. Production and tests therefore
+follow the same dependency-composition path; only the supplied services differ.
+`disposeAppRuntime()` and `runtime.dispose()` release runtime resources so one
+test cannot leak state into the next.
 
-## Loop health as a service
+## Loop health: a pure safety policy
 
-`apps/core/src/effect/loop-health.ts` is the one piece of actual policy living
-in this directory: `createLoopHealthEvaluator()` decides whether a running
-session should keep going, warn, or hard-stop, based on four independent
-heuristics tracked on `SessionState.loopHealth`:
+`loop-health.ts` is different from the wiring files: it contains actual
+decision logic. `createLoopHealthEvaluator()` examines the loop state and
+returns one of three actions: `continue`, `warn`, or `stop`.
 
-| Heuristic | Signal | Warn at | Stop at |
+| Signal | Beginner meaning | First response | Escalation |
 | --- | --- | --- | --- |
-| Repeated identical tool call | same call fired over and over | threshold | 2× threshold |
-| Stagnant turns | no file changed for N turns | threshold | — |
-| Oscillation | edit → revert → edit pattern | threshold | 2× threshold |
-| Iteration cap | hard ceiling regardless of pattern | — | `totalIterationLimit` |
+| Repeated tool call | the same action keeps failing or repeating | warn | stop at twice the threshold |
+| Stagnant turns | several turns changed no files | warn | no separate hard-stop rule |
+| Oscillation | edit, undo, then edit again | warn | stop at twice the threshold |
+| Repeated reasoning | near-identical reasoning appears across turns | warn | stop at twice the threshold |
+| Iteration cap | the configured maximum number of loop iterations is reached | — | stop immediately |
 
-Every check uses a two-tier warn-then-stop braking scheme, on purpose:
-legitimate long tasks routinely re-read or re-edit the same file, so the
-first breach only warns the model (via a system reminder next turn) instead
-of ending the session. A hard stop only fires at double the threshold, where
-the pattern is almost certainly a genuine stuck loop rather than real work.
+The warn-then-stop approach is intentional. Real coding tasks often read the
+same file twice or revise a change; one suspicious signal should remind the
+model to reassess, not immediately kill useful work. A repeated pattern is much
+stronger evidence of a stuck loop.
 
-This evaluator used to live inline in `agent/loop.ts` as a second, duplicate
-implementation — it was collapsed into the one here so there is exactly one
-copy of the policy (see `docs/specs/2026-08-26-trajectory-redirection.md`,
-decision D10). `layers.ts` re-exports it from its old import path for
-backward compatibility.
+The evaluator is a **pure function object**: it reads state and thresholds and
+returns an action without disk, network, or UI work. That makes the policy easy
+to test independently from the agent loop.
 
-## Why this exists
+## What DI does—and does not—cover today
 
-Before this refactor, modules reached for module-level singletons directly
-(`import { bus } from "../bus/index.js"`), which meant a unit test exercising
-`agent/loop.ts` also touched the real session store on disk unless every
-singleton was individually mocked. With the DI graph, a test provides
-`makeTestLayer()` once and every dependency underneath — including transitive
-ones like `SessionManagerLive`, which itself depends on `SessionStoreTag` — is
-swapped consistently. See `apps/core/src/effect/runtime.test.ts` for the
-tests that exercise this composition directly.
+Before this boundary existed, testing `agent/loop.ts` could touch a real session
+store unless every singleton was mocked separately. Now a test supplies
+`makeTestLayer()` once and the loop receives a consistent group of test-safe
+dependencies. `SessionManagerLive`, for example, automatically receives the
+same session store supplied to the graph.
+
+The migration is intentionally incomplete. The bus remains a module singleton,
+and the provider-registry tag has no live consumer yet. **Dependency inversion**
+is the direction of the design, while the strongest current test seam is around
+agent-loop construction and session persistence.
+
+## Interview vocabulary
+
+- **Dependency injection (DI):** pass dependencies into code rather than
+  constructing them inside the code.
+- **Inversion of control (IoC):** the composition root chooses concrete
+  implementations; the agent loop does not choose its own store.
+- **Interface / contract:** a stable shape, such as `SessionStore`, that both a
+  live implementation and a test double can satisfy.
+- **Composition root:** `layers.ts`, where dependencies are assembled in one
+  place.
+- **Lifecycle management:** `ManagedRuntime` creates shared services and its
+  disposal API releases them after a test or shutdown.
+- **Memoization:** reuse one constructed dependency instead of rebuilding it
+  for every consumer.
+- **Pure function:** a calculation with no I/O or hidden mutation, such as the
+  loop-health decision.
+
+## Where to look
+
+| You want | File |
+| --- | --- |
+| Service tags and contracts | `apps/core/src/effect/context.ts` |
+| Live and test wiring | `apps/core/src/effect/layers.ts` |
+| Shared runtime lifecycle | `apps/core/src/effect/runtime.ts` |
+| Loop-health policy | `apps/core/src/effect/loop-health.ts` |
+| Proof that test injection reaches a real loop | `apps/core/src/effect/runtime.test.ts` |
+
+Related: [Agent loop](/internals/agent-loop) for the Effect that resolves these
+services, [Sessions, store & rollout](/internals/sessions) for the injected
+session store, and [Provider layer](/internals/providers) for the provider
+registry that is not yet consumed through DI.
