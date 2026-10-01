@@ -15,6 +15,23 @@ the **episodic** layer: specific past events, stored with their timestamps, in t
 order they happened. It is the one layer that keeps everything and forgets
 nothing — which is exactly why it needs three different shapes on disk.
 
+## Start here: three records for three jobs
+
+It is easy to call all of this “session history,” but the files solve different
+problems. Think of them as a chat transcript, a flight recorder, and an unused
+database view:
+
+| Record | Simple meaning | Main reader |
+| --- | --- | --- |
+| Session transcript | What the model should remember next | the agent loop |
+| Rollout log | What actually happened while it worked | traces, debugging, evaluations |
+| Thread store | A relational index prepared for future readers | no live production reader yet |
+
+This separation is an **event-sourcing** pattern. The transcript can be made
+shorter when it grows too large; the audit log stays append-only, so an operator
+can still investigate the original work later. Keeping those jobs separate is
+what lets FreeCode optimize the prompt without losing observability.
+
 ## Two logs, two readers
 
 The same turn gets written down twice — a third shape (the thread store, below)
@@ -36,7 +53,10 @@ compaction later erased. One file cannot be both, so there are two.
 ├── sessions/<project-dir>/<sessionId>/
 │   ├── meta.json            title, provider, model, status, counts
 │   ├── messages.jsonl       one message per line, appended as produced
-│   └── context-cache.json   files requested across turns
+│   ├── context-cache.json   files requested across turns
+│   ├── todos.json           persistent task list for this session
+│   └── checkpoints.json     links a user turn to a file snapshot
+├── snapshots/<project-hash>/ # private Git data used by checkpoints
 ├── state/
 │   ├── freecode.db          SQLite: threads, turns, tool_calls
 │   └── store.json           JSON fallback when SQLite is unavailable
@@ -60,9 +80,10 @@ C:\Users\john\projects\myapp    → C__Users__john__projects__myapp
 
 Segments join with `__`, literal hyphens escape to `_h_`, and Windows-illegal
 characters (`< > : " | ? *`) are stripped — which is what turns `C:\` into `C`.
-The escaping exists so the transform is **reversible**: `parseSessionDirName()`
-recovers the original path, so a directory listing is enough to answer "which
-project was this?" without opening any file.
+For normal Unix-style paths the formatter can be parsed back into a readable
+path. Treat the directory name as a safe storage key, not a perfect reversible
+copy of every possible Windows path: the drive colon is deliberately removed.
+`meta.json` remains the authoritative project path.
 
 > Persistent memory now keys on the same transform (`mem-store.ts` imports
 > `formatSessionDirName`), so the two stores agree on what identifies a project.
@@ -75,8 +96,10 @@ project was this?" without opening any file.
 | Send | `session.send` | the loop runs; each message is appended as it is produced |
 | Resume | `session.resume` | metadata + full message log returned; the loop reloads them into history |
 | Switch | `session.switch` | changes which session is current; nothing is loaded |
-| Fork | `session.fork` | copies the log into a new session with `parentId` set |
-| Archive / delete | `session.archive` / `session.delete` | status changes only |
+| Fork | `session.fork` | copies the active transcript into a new session with `parentId` set |
+| Browse / move in history | `session.tree` / `session.navigate` | shows branches, then selects the conversation path to continue |
+| Rewind | `session.rewind` | restores a checkpoint's files, then optionally moves the conversation to the same point |
+| Archive / delete | `session.archive` / `session.delete` | archive changes status; delete is soft unless `purge: true` is requested |
 | Share | `session.export` / `import` / `upload` / `download` | JSON payload to a sync endpoint or local remote dir |
 
 Two behaviours in that table are worth knowing before you trust them:
@@ -171,6 +194,51 @@ with before/after token counts, so the erased turns remain reconstructible.
 reference: the two histories diverge from that point and neither can corrupt the
 other. Cheap, because sessions are text.
 
+## A session can also branch
+
+A fork creates a different session. A **session tree** creates a branch inside
+the same session. This is useful when you want to revisit an earlier user or
+assistant message and try a different direction without deleting the later
+conversation.
+
+```text
+user: “fix the login bug”
+  └─ assistant: investigates
+      ├─ old path: changes authentication
+      └─ active path: investigate the database instead
+```
+
+`session.tree` returns previews and branch relationships, not message bodies.
+`session.navigate` picks an earlier entry as the active leaf; the next message
+continues from there and records a parent link in `messages.jsonl`. The old
+branch remains in the log until a later compaction rewrites the transcript.
+Navigation is refused while a turn is running,
+because a live loop could otherwise append its next result to the wrong branch.
+
+Optionally, FreeCode summarizes the branch being set aside and appends that
+summary to the new active path. This is a **branching conversation** design:
+history is preserved for review, while the model sees only one coherent active
+path on its next request.
+
+## Checkpoints and rewind
+
+Conversation history alone cannot undo files. Before each user turn, FreeCode
+can capture a checkpoint of the project working tree. A checkpoint is linked to
+the same session-tree entry id as that user message, and `checkpoints.json`
+stores the link beside the transcript.
+
+`/rewind` first previews the file changes, then—after confirmation—restores the
+files and moves the conversation to that point. The order matters: files are
+restored first, so a failed restore never leaves you with a rewound conversation
+that describes files which were not restored.
+
+Snapshots use a separate **shadow Git repository** under
+`~/.freecode/snapshots/`. Capture and restore never modify the project's Git
+index, branch, stash, or `git status`. Checkpoints require a Git project, are
+best-effort when captured, and are explicit when restored. Because FreeCode
+cannot distinguish its edits from your manual edits after a checkpoint, rewind
+restores every changed path shown in the preview—review that list carefully.
+
 ## Rollout: the append-only record
 
 Everything the agent does emits an event to
@@ -184,7 +252,7 @@ Everything the agent does emits an event to
 | `aggregateID` | what this is a record *of* — usually the session |
 | `timestamp` | wall clock |
 
-Nineteen event types, grouped by what they record:
+The event types are grouped by what they record:
 
 | Group | Events |
 | --- | --- |
@@ -193,6 +261,7 @@ Nineteen event types, grouped by what they record:
 | Model | `model.request`, `model.first_token`, `model.response`, `model.error` |
 | Context | `compact.occurred`, `context.overflow` |
 | Extensions | `subagent.start`, `subagent.stop`, `skill.invoked`, `hook.triggered`, `hook.blocked` |
+| Session safety | `session.navigate`, `checkpoint.captured`, `checkpoint.skipped`, `checkpoint.restored` |
 | Loop health | `redirect.triggered`, `redirect.skipped` |
 | Failure | `parse.error` |
 
@@ -291,6 +360,25 @@ the transcript.
 
 Nothing syncs automatically. Export is an explicit action, because a session
 transcript contains file contents and command output from your machine.
+
+## Interview vocabulary
+
+These are the useful terms behind this subsystem:
+
+- **Session persistence:** saving a conversation so it can resume after a
+  restart instead of treating each prompt as isolated.
+- **JSONL (JSON Lines):** one JSON record per line; it supports cheap appends
+  and streaming-style logs.
+- **Event sourcing / append-only audit log:** record facts as events and build
+  new views later by folding those events.
+- **Materialized view:** the thread store is a query-friendly relational shape
+  derived from session data, although it is not yet on the live write path.
+- **Compaction:** replace older transcript detail with a summary so the model
+  stays within its context window.
+- **Branching conversation:** preserve alternate history paths while choosing
+  one active path for the next model request.
+- **Checkpoint / shadow repository:** a recoverable working-tree snapshot that
+  leaves the project's own Git state untouched.
 
 ## Known gaps
 
