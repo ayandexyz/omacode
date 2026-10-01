@@ -1,18 +1,115 @@
 ---
 title: "Adding a provider"
-description: "Implement AIProvider and self-register."
+description: "Extend the catalogue first; write a bespoke adapter only for a genuinely different transport or authentication flow."
 ---
 
 # Adding a provider
 
-Copy an existing adapter. A provider implements `AIProvider`, self-registers on
-import, and normalizes its stream so the loop needs no knowledge of it.
+Start by deciding whether a new adapter is actually needed. FreeCode is
+**catalogue-driven**: most API-key providers are discovered from models.dev and
+share one generic AI SDK driver. Adding a `foo.ts` wrapper for every vendor
+would duplicate request conversion, streaming, timeouts, caching, and usage
+normalization.
 
-## On this page (coming soon)
+Use a catalogue update when the provider uses a bundled SDK factory and plain
+API-key authentication. Use a bespoke provider only when its transport or
+authentication is materially different—for example, `gemini-web` speaks a
+signed-in web-session protocol rather than a normal API.
 
-- Implementing the interface
-- Self-registration and the init list
-- Normalizing the stream: text, thinking, tool calls, usage
-- Prompt caching support
-- Model metadata and context limits
-- Quirks to expect (e.g. stringified numeric tool arguments)
+## 1. Check the catalogue path first
+
+Refresh the shipped offline snapshot:
+
+```bash
+pnpm gen:catalogue
+```
+
+Then inspect the generated entry in
+`apps/core/src/providers/catalogue-snapshot.ts`. A provider is registered when
+its `npm` SDK package has a loader in `sdk-factories.ts`; registration is
+metadata-only, so it does not import the SDK or require a key at startup.
+
+If the upstream catalogue is correct and its SDK is already listed in
+`sdk-factories.ts`, no provider adapter is required. Test the real request path
+with that provider and add focused tests for any observed edge case.
+
+## 2. Add a narrow override when metadata is wrong for FreeCode
+
+`OVERRIDES` in `apps/core/src/providers/catalogue.ts` is the only
+FreeCode-owned provider data. Add an entry only for a verified difference such
+as:
+
+- a safe default model;
+- a different SDK package or endpoint needed for correct usage/caching;
+- an output-token default; or
+- a verified reasoning-effort family.
+
+Document why the upstream value is unsuitable. Do not turn `OVERRIDES` into a
+second provider catalogue.
+
+## 3. Add an SDK factory when the package is supported
+
+Add a lazy `import()` loader to `sdk-factories.ts`. Its factory must accept the
+common options: API key, optional base URL, timeout-wrapped `fetch`, and a
+provider name when required by the SDK. The lazy import is intentional: opening
+FreeCode should not load every SDK package just because the catalogue is large.
+
+## 4. Use the generic request path
+
+`generic-provider.ts` creates the `AIProvider` contract:
+
+```ts
+interface AIProvider {
+  info: ProviderInfo;
+  execute(options: ExecuteOptions): Promise<ExecuteResult>;
+  stream?(options: ExecuteOptions): AsyncIterable<ProviderChunk>;
+}
+```
+
+It converts FreeCode messages and tool definitions to AI SDK input, applies the
+appropriate system-prompt and cache shape, calls `generateText` or `streamText`,
+then normalizes the result. Keep provider-specific conditionals keyed to an SDK
+package or a documented capability—not a growing list of provider ids.
+
+The non-negotiable invariants are:
+
+- tool-call input is an object; invalid/truncated JSON must not be persisted;
+- tool calls and tool results remain correctly paired in history;
+- usage is additive (`inputTokens` already includes cache reads and writes);
+- retries stay in the recovery manager (`PROVIDER_MAX_RETRIES` is `0`);
+- header and streaming liveness are measured at the `fetch` layer.
+
+## 5. Build a bespoke provider only when necessary
+
+A bespoke implementation registers an `AIProvider` with
+`registerProvider(id, definition)`. It must provide accurate `ProviderInfo` and
+produce the shared `ProviderChunk` events: `text_delta`, `thinking_delta`,
+`tool_call`, `usage`, `done`, or `error`.
+
+Keep the boundary strict. The agent loop must not learn a vendor's wire format,
+credential flow, or retry rules. If a provider does not use API keys, declare
+`requiresApiKey: false`; if background model calls are inappropriate for its
+quota model, declare `auxiliaryCalls: false`.
+
+## 6. Test the behavior, not only registration
+
+At minimum, cover the new branch with focused tests beside the provider code:
+
+- catalogue resolution and credential precedence;
+- request shape, including messages, tools, and system blocks;
+- stream normalization, including malformed tool arguments;
+- timeout/error behavior; and
+- usage and model metadata when the provider reports them.
+
+Run the relevant provider tests, then the core type check before submitting the
+change. The [Provider layer](/internals/providers) explains the full runtime
+flow and the design trade-offs behind these rules.
+
+## Interview vocabulary
+
+This architecture demonstrates the **adapter pattern**, **dependency inversion**,
+**lazy loading**, **capability-based configuration**, **stream normalization**,
+and **centralized resilience policy**. The concise explanation is: “The agent
+depends on a stable provider contract; catalogue metadata and adapters absorb
+vendor differences so that one vendor cannot leak protocol details into the
+agent loop.”

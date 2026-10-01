@@ -17,7 +17,7 @@ Four pages take you from nothing installed to a working session:
 | --- | --- |
 | [Installation](/getting-started/installation) | the one-line install, what it writes to disk, updating, uninstalling |
 | [Quickstart](/getting-started/quickstart) | your first session, the permission prompt, interrupting, resuming |
-| [Providers & API keys](/getting-started/providers) | the six providers, where each key is read from, switching models |
+| [Providers & API keys](/getting-started/providers) | the provider catalogue, credential lookup, and switching models |
 | [Configuration](/getting-started/configuration) | the files you edit by hand, and which of them to commit |
 
 ## Before you start
@@ -28,8 +28,10 @@ You need three things:
 2. **A project directory.** Git is not required, but the agent uses git HEAD as
    context and every code-editing workflow assumes you can `git diff` what it
    did. Start somewhere you can throw away changes.
-3. **One provider API key** — Anthropic, OpenAI, Gemini, DeepSeek, MiniMax, or
-   Z.ai. You bring the key; FreeCode calls the API directly from your machine.
+3. **One provider API key** — the featured choices are Anthropic, OpenAI,
+   Gemini, DeepSeek, MiniMax, and Z.ai, with many more available through the
+   catalogue. You bring the key; FreeCode calls the API directly from your
+   machine.
 
 Nothing else is a prerequisite. The binary is self-contained: no Node, no
 runtime install, no `npm i -g`.

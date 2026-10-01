@@ -1,37 +1,59 @@
 ---
 title: "Providers & API keys"
-description: "Configure Anthropic, OpenAI, Gemini, MiniMax, DeepSeek, or Z.ai."
+description: "Choose a model provider, store its credential safely, and switch models."
 ---
 
 # Providers & API keys
 
-Six providers are built in. Each one implements the same interface and registers
-itself, so switching provider or model is a setting — never a code change, and
-never a different agent. All six go through the Vercel AI SDK with real
-streaming, native tool calling, and usage accounting.
+FreeCode sends model requests directly from your machine to the provider you
+choose. It does not proxy your API key through a FreeCode service. Pick a
+provider and model with `/model` in the TUI, paste the key when asked, and start
+working.
 
-| Provider | Provider id | API key variable | Default model |
+The agent behaves the same after you switch providers. That is the point of the
+**provider abstraction**: the agent loop depends on one common interface for
+streaming text, tool calls, cancellation, and token usage; the provider layer
+handles each vendor's API details. See [Provider layer](/internals/providers)
+for the implementation.
+
+## What FreeCode supports
+
+FreeCode builds its API-provider catalogue from a shipped
+[models.dev](https://models.dev) snapshot, optionally refreshed from a local
+models.dev cache. It registers only catalogue entries whose AI SDK factory is
+bundled, so a provider shown as supported has a request path rather than a
+placeholder adapter.
+
+The six providers below are **featured choices**, not the complete list:
+
+| Provider | Provider id | API key variable | Verified default model |
 | --- | --- | --- | --- |
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-5` |
 | OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-4o` |
-| Gemini | `gemini` | `GEMINI_API_KEY` | `gemini-3.6-flash` |
+| Gemini | `gemini` | `GOOGLE_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, or `GEMINI_API_KEY` | `gemini-3.6-flash` |
 | DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-chat` |
 | MiniMax | `minimax` | `MINIMAX_API_KEY` | `MiniMax-M2` |
-| Z.ai | `zai` | `ZAI_API_KEY` | `glm-5.2` |
+| Z.ai | `zai` | `ZHIPU_API_KEY` | `glm-5.2` |
 
-The default model only applies when nothing else specifies one; in practice your
-pick from `/model` is pinned to the session from its first turn.
+For another provider, use `/model` and select it. The catalogue supplies its
+provider id, endpoint, SDK family, and accepted environment-variable names.
+Not every catalogue provider has a default model: if FreeCode has not verified
+one, choose a model explicitly instead of letting it guess a model id.
 
-## Setting a key
+`gemini-web` is separate from this catalogue. It uses a Gemini web session,
+not a metered API key, and is intended for ask/review work. See the model
+picker for its cookie guidance and limitations.
 
-The way you are meant to do it is `/model` in the TUI: pick a provider, pick a
-model, paste the key into the masked field. That writes both halves of what a
-session needs — the credential *and* the choice — to `~/.freecode/config.json`:
+## Add a key
+
+The simplest route is `/model`: choose a provider and model, then paste the
+key into the masked prompt. FreeCode saves the choice and credential in
+`~/.freecode/config.json` with owner-only permissions.
 
 ```json
 {
   "providers": {
-    "anthropic": { "apiKey": "sk-ant-…" }
+    "anthropic": { "apiKey": "sk-ant-..." }
   },
   "current": {
     "provider": "anthropic",
@@ -40,65 +62,60 @@ session needs — the credential *and* the choice — to `~/.freecode/config.jso
 }
 ```
 
-You can write that file by hand. Keep it to yourself: it is the one file in
-FreeCode that holds a secret, which is exactly why permissions and hooks live
-somewhere else that is safe to commit.
+You may edit this file yourself, but never commit it: it can contain API keys
+and web-session credentials.
 
-### Lookup order
+### Credential lookup order
 
-`getApiKey` (`providers/config.ts`) tries these in order:
+For a normal provider, FreeCode checks the provider's environment variables
+first, then `providers.<id>.apiKey` in `config.json`. In other words, an
+environment variable overrides the stored key, which is useful for CI and for
+temporarily using a different account.
 
-1. the provider's environment variable
-2. `config.json` → `providers.<id>.apiKey`
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+freecode
+```
 
-so **the environment wins over the stored key**, like every other
-configuration surface here. A `-coding-plan` variant is the one exception:
-the catalogue declares the *base* provider's env var for it, so the generic
-env var is checked *after* the variant's own `config.json` entry (or a
-`MINIMAX_API_KEY` export would hijack a deliberately-configured plan key
-that bills a different plan), and the base provider's stored key is the
-final fallback.
+If neither source contains a key, the error names both the expected variable
+and the configuration path. The environment-variable names come from the
+catalogue; they are not guessed from the display name.
 
-If everything misses it throws a message naming both the config path and the
-variable.
+There is one deliberate exception for `*-coding-plan` variants: their own
+stored key is checked before a shared base-provider environment variable, so a
+generic key cannot silently select the wrong billed plan.
 
-> An environment variable alone is enough when it is the *only* credential:
-> with no `current.provider` set, a sole configured credential (say, just
-> `ANTHROPIC_API_KEY` exported) selects that provider, interactively and
-> headlessly alike. Several credentials with no choice stay an error naming
-> them — picking among them would be a guess — so run `/model` once, or pass
-> the provider explicitly: `freecode run --model anthropic/claude-sonnet-4-5 "…"`.
+If you have exactly one configured credential but have not selected a current
+provider, FreeCode can use that one. With several credentials, it asks you to
+choose rather than guessing.
 
-## Switching models
+## Switch models
 
 | Where | How |
 | --- | --- |
-| TUI | `/model`, any time — the mode line shows what is active |
-| Headless | `freecode run --model <provider>/<model>` (no slash changes only the model) |
-| Everywhere | edit `current` in `~/.freecode/config.json` |
+| TUI | Run `/model` and select a provider/model. |
+| Headless | Run `freecode run --model <provider>/<model> "…"`. |
+| Config file | Set `current.provider` and `current.model` in `~/.freecode/config.json`. |
 
-The model is pinned to the session at creation and persisted with it
-(`server.ts:269`). That is deliberate: leaving it unset used to let each turn
-fall through to the provider's *default* model, which is how a session
-configured for one MiniMax model quietly ran on a smaller one and overflowed a
-window the meter said was 20% full.
+A model is pinned when a session starts and persisted with that session. This
+keeps later turns from silently falling back to a provider default if settings
+change. Model metadata—context window, maximum output, and image support—comes
+from models.dev and is used by compaction and attachment validation.
 
-## Where the model list comes from
+## Subscription sign-in
 
-FreeCode does not ship a model table. Model ids, context windows, output limits,
-and whether a model accepts images all come from
-[models.dev](https://models.dev), fetched once and cached in
-`~/.freecode/cache/models-dev.json` with a 5-minute TTL and an indefinite
-on-disk fallback (`models-dev.ts:9`). Offline, you keep working from the cache.
+Anthropic and OpenAI can also use their supported subscription-login flows.
+They are opt-in alternatives to an API key, not a replacement for the normal
+API path:
 
-This matters more than a model picker: the context window it reports is what
-[compaction](/guides/compaction) budgets against, and the vision flag is what
-decides whether an attached image is sent at all.
+- [Anthropic subscription](/getting-started/anthropic-subscription)
+- [OpenAI subscription](/getting-started/openai-subscription)
 
-## Failing over to another provider
+## When a provider fails
 
-When a provider exhausts its retry budget or hits a fatal error, FreeCode can
-move the run to another one:
+The agent loop owns retries and optional provider fallback. SDK retries are
+disabled so retry attempts cannot multiply unexpectedly. You can configure a
+fallback order in `config.json`:
 
 ```json
 {
@@ -108,33 +125,24 @@ move the run to another one:
 }
 ```
 
-Tried in order, each with its own retry budget (`agent/recovery/manager.ts:381`).
-A 429 that means *quota exhausted* is never retried against the same provider —
-waiting cannot help, and each retry re-sends the whole conversation for a
-guaranteed rejection — so a fallback chain is the only thing that keeps a long
-run alive when your plan runs out mid-task.
+A temporary failure may be retried according to the recovery policy. A known
+quota-exhausted response is not retried against the same provider; waiting and
+resending the full conversation would not help, so FreeCode moves to the next
+fallback when one is configured.
 
-There is no UI for this; it is a hand-edit in `config.json`.
+## Interview vocabulary
 
-## What differs between providers
+If you are explaining this design in an interview, the key ideas are:
 
-Not much reaches the agent loop. The one real fork is how the system prompt is
-shaped: Anthropic-shaped providers (Anthropic, MiniMax, Z.ai — the latter two
-speak the Anthropic Messages format at a different base URL) receive system
-*blocks* that can carry individual prompt-cache breakpoints, while OpenAI-shaped
-providers get those blocks joined into one string because their caching is
-automatic and there is nothing to mark.
-
-Expect vendor quirks below that line. MiniMax stringifies numeric tool
-arguments, which is why every tool schema declares an explicit `type` and the
-orchestrator coerces on the way in. The full picture is in
-[the provider layer](/internals/providers).
-
-## Known gaps
-
-Found while writing this page; each is also tracked in `TODO.md`.
-
-- **Nothing surfaces which source a key came from.** The environment now
-  overrides the stored key, but when both are set nothing reports which one a
-  request actually used — diagnosing a wrong-key 401 still means checking both
-  by hand.
+- **Provider abstraction / adapter pattern:** one stable contract hides vendor
+  APIs from the agent loop.
+- **Dependency boundary:** SDK factories, credentials, endpoints, and request
+  shaping stay in `providers/`, not in UI or agent logic.
+- **Lazy loading:** FreeCode registers metadata at startup but imports an SDK
+  and reads a key only when that provider is first used.
+- **Streaming normalization:** provider-specific stream events become common
+  text, reasoning, tool-call, usage, done, and error chunks.
+- **Resilience:** fetch-layer header and SSE-stall timeouts plus one central
+  retry/fallback policy prevent duplicate retry loops.
+- **Prompt caching and usage accounting:** stable prefixes reduce repeat input
+  cost, while normalized usage keeps billing calculations comparable.
