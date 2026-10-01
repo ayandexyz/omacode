@@ -4,6 +4,7 @@ export default {
   index: "Overview",
   "agent-loop": "Agent loop",
   providers: "Provider layer",
+  caching: "Caching",
   tools: "Tool system",
   context: "Context engine",
   bus: "Event bus",

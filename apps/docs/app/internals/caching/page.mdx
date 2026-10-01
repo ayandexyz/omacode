@@ -1,0 +1,181 @@
+---
+title: "Caching"
+description: "What FreeCode caches, when it reads or writes a cache, and what can make a cache go cold."
+---
+
+# Caching
+
+Caches let FreeCode avoid doing the same expensive work twice. There are two
+different kinds:
+
+1. **Prompt cache** — owned by the AI provider. It lowers the price of sending
+   the same beginning of a conversation again.
+2. **Local caches** — owned by FreeCode. They avoid repeatedly scanning the
+   project, loading tools, or computing data that has not changed.
+
+They solve different problems. A prompt-cache hit saves model-input cost; a
+local-cache hit saves FreeCode work. Neither is a saved copy of your whole
+conversation on disk.
+
+## Prompt cache: read vs. write
+
+Think of the provider's prompt cache as a photocopier beside the model. On the
+first request, the provider prepares a reusable copy of the stable beginning
+of the prompt. That is a **cache write**. On the next request, if that beginning
+is exactly the same, the provider can reuse its copy. That is a **cache read**.
+
+For example, imagine this conversation:
+
+```text
+Request 1: system instructions + tool list + earlier chat + "Read src/app.ts"
+           └──────────────────── cache write ────────────────────┘
+
+Request 2: system instructions + tool list + earlier chat + result + "Fix the bug"
+           └────────────── cache read ──────────────┘  └─ new input ─┘
+```
+
+The first request normally writes a reusable prefix. The second request can
+read that old prefix cheaply, then pays the normal rate only for the new result
+and new instruction.
+
+### The essential rule: the beginning must not change
+
+Providers compare the cached prefix byte-for-byte. Changing an old system
+instruction, tool definition, skill, model, or compacted conversation means
+the affected prefix cannot be reused. Adding a new user message at the end is
+normal and does **not** by itself break the earlier prefix.
+
+FreeCode deliberately keeps changing per-turn material—such as recalled
+memories, reminders, and todos—in an **ephemeral tail** after the cache anchor.
+That makes only the small changing part fresh input instead of invalidating the
+whole conversation.
+
+### What FreeCode writes and reads
+
+FreeCode places cache anchors in three stable parts of an AI request:
+
+| Part | Why it is cached | Simple example |
+| --- | --- | --- |
+| System prompt | It is mostly unchanged across a session. | FreeCode's operating instructions and project guidance. |
+| Tool definitions | Tools are usually unchanged across turns. | The schemas for `read`, `edit`, and `bash`. |
+| Conversation history | Old messages are repeated on later calls. | The earlier discussion and tool results. |
+
+Each request gets a **write anchor** near its end so the next request has
+something to reuse. It also gets a **read anchor** at the boundary where the
+previous request ended. Both are needed: only writing would create an entry for
+the future; only reading would have nothing new to reuse.
+
+### Cache token numbers without double counting
+
+When a provider reports cache usage, FreeCode shows three useful values:
+
+| Value | Meaning | Example |
+| --- | --- | --- |
+| `inputTokens` | The complete prompt size, including normal input, cache reads, and cache writes. | `10,000` tokens were sent in total. |
+| `cacheReadTokens` | The part served from the provider cache. | `8,000` tokens reused cheaply. |
+| `cacheWriteTokens` | The part newly stored for later reuse. | `500` tokens prepared for the next call. |
+
+If a request reports `10,000` input tokens, `8,000` cache reads, and `500`
+cache writes, the remaining `1,500` is normal input. Do **not** add cache reads
+or writes to `inputTokens` again: they are already inside that total.
+
+Cache reads are generally discounted; cache writes may cost the normal input
+rate or more, depending on the provider. The exact prices come from the
+provider/model price table, so a cache read is a discount on input cost, not an
+extra charge.
+
+## What you see in FreeCode
+
+The status row can show `yield`, `last`, and `session` cache percentages:
+
+```text
+12.3K / 200.0K · yield 99% · last 97% · session 91%
+```
+
+- **yield** asks: “Did this request reuse what the previous request made
+  cacheable?” Near 100% is healthy.
+- **last** asks: “What fraction of the newest request was read from cache?” A
+  large new message can legitimately lower it.
+- **session** is the overall cached share for the session so far.
+
+A first request says `priming`: it has written a cache entry, but there is no
+earlier entry to read yet. See [Usage & cost](/guides/usage) for the full
+readout and its miss-attribution labels.
+
+## When a prompt cache goes cold
+
+The common expected causes are:
+
+| Cause | What happened | What to do |
+| --- | --- | --- |
+| First request | Nothing has been cached yet. | Continue; the next request can reuse it. |
+| Long pause | Anthropic's default cache lifetime is 5 minutes. | Continue, or choose the 1-hour TTL when pauses are common. |
+| Model/provider switch | The new destination has no entry for this conversation. | Expected; the cache warms again. |
+| Compaction | FreeCode rewrote history into a shorter summary. | Expected; this trades a one-time reset for less future context. |
+| Changed instructions, skills, or tools | A stable prompt section changed. | Expected after intentional changes. |
+
+Set `FREECODE_CACHE_TTL=1h` to request Anthropic's extended prompt cache.
+It is useful for human-paced sessions, but its cache writes cost more, so the
+default remains `5m`. Set `FREECODE_CACHE_MISS_NOTICES=0` only to hide notices;
+it does not disable caching. For a difficult unexplained miss,
+`FREECODE_DEBUG_CACHE=1` writes safe length-and-hash fingerprints to stderr so
+two consecutive requests can be compared. All cache settings are listed in
+[Environment variables](/reference/env#provider-requests).
+
+## Provider differences
+
+FreeCode sends the appropriate cache markers for Anthropic and compatible
+routes, OpenRouter, Alibaba, and Bedrock. OpenAI's own API uses a stable
+per-session `promptCacheKey` to help route related requests to the same cache
+shard. Some providers cache automatically, report only part of the usage, or
+do not offer prompt caching; in those cases the read/write fields can be absent.
+
+The Gemini web-session provider has no prompt cache, so it keeps changing
+content in the same small tail for consistency but cannot report prompt-cache
+reads or writes.
+
+For the implementation-level explanation of marker placement, provider option
+shapes, normalization, and miss detection, read [Provider layer](/internals/providers#prompt-caching).
+
+## Local caches inside FreeCode
+
+These caches never ask an AI provider to reuse a prompt. They simply avoid
+repeating local work.
+
+| Cache | What it saves | When it refreshes |
+| --- | --- | --- |
+| Project context | Rebuilding the file tree and Git HEAD information. | After a mutating tool, a top-level filesystem/Git change, or its 5-minute fallback TTL. |
+| File-tree strategy | Reformatting the tree for the prompt. | When project path, Git HEAD, ignore rules, or related tool definitions change. |
+| Tool definitions | Rebuilding the sorted schemas sent to the model. | When built-in or MCP tools change. |
+| Repo-map symbols | Re-scanning all project symbols. | On Git HEAD changes, explicit invalidation, or 5-minute TTL. |
+| Skills | Re-scanning installed project skills. | On reload/invalidation; a missing newly added skill also falls through to disk. |
+| Model catalogue | Fetching provider/model metadata. | Memory → disk → network, with a 5-minute TTL and stale-disk fallback. |
+| Session file content | Re-reading files immediately after a session resumes. | It is a per-session write-through store and warms after the first turn. |
+| MCP tool catalogue | Rediscovering tools from a connected MCP server. | The server connection's lifetime. |
+| Memory graph vectors | Re-embedding identical memory content. | Never by time: vectors are keyed by content hash. |
+
+For example, when `edit` changes a file, FreeCode invalidates the project
+context cache. The next turn rebuilds the tree, so the model sees the change.
+But it does not need to re-fetch the model catalogue or re-embed an unchanged
+memory—those separate caches remain warm.
+
+## What is intentionally not cached
+
+FreeCode does not locally cache the rendered model prompt: doing so could make
+it stale while duplicating work the provider prompt cache already handles. It
+also does not currently use an in-flight deduplication cache for simultaneous
+identical computations; normal agent turns are sequential, so that complexity
+has not been necessary.
+
+## Further reading
+
+- [Usage & cost](/guides/usage) — read the user-facing cache status and misses.
+- [Provider layer](/internals/providers#prompt-caching) — anchors, provider
+  options, usage normalization, and observability.
+- [Compaction](/internals/compaction) — why rebuilding history intentionally
+  resets a prompt cache.
+- [Environment variables](/reference/env#provider-requests) — TTL, miss
+  notices, and debugging controls.
+
+The repository's exhaustive engineering reference, including every cache key,
+TTL, invalidator, and source-file index, is `docs/caching-architecture.md`.
