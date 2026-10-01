@@ -1,7 +1,7 @@
 // =============================================================================
 // Run budget — four independent ceilings, first one hit stops the run.
 // PURE: no IO, no clock of its own (`now` is passed in), no agent loop.
-// Spec: docs/specs/2026-08-10-autonomous-runs-design.md §4.3,
+// Spec: docs/specs/2026-09-28-overnight-runs.md,
 // a direct port of Prime Agent's `autonomousLimitReason` plus `maxUsd`.
 // =============================================================================
 

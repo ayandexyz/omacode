@@ -1,192 +1,177 @@
 ---
 title: "Autonomous runs"
-description: "How freecode night is built — orchestrator, iteration, envelope, quota waits, report, detached worker and sandbox."
+description: "How freecode night performs bounded, reviewable unattended work."
 ---
 
 # Autonomous runs
 
-`apps/core/src/autonomous/` implements `freecode night`. For how to use it, see
-[overnight runs](/guides/overnight-runs). The design lives in
-`docs/specs/2026-09-28-overnight-runs.md`, and its §8 is the implementation
-record for Phases 0–5, all built on 2026-09-28. That spec replaces Phases 1–5 of
-`2026-08-10-autonomous-runs-design.md`. Only that older spec's Phase 0 (`types.ts`,
-`budget.ts`, `run-store.ts`) is still used.
+`freecode night` is the implemented unattended-work feature. It is built
+through Phase 5 of `docs/specs/2026-09-28-overnight-runs.md`: it runs short agent iterations, commits successful work to
+a dedicated `night/*` branch, records decisions, and produces a report for
+human review.
 
-## Shape
+The shared manifest types, budget calculations, and atomic run storage are the
+foundation beneath `freecode night`. The overnight specification is the current
+design and implementation record.
 
-```
-cli/commands/night.ts       yargs surface, duration/time parsing
-cli/commands/night-run.ts   composition root: preflight, boot, wire deps, exit summary
-        │
-        ▼
-autonomous/orchestrator.ts  runNight(deps, limits) — PURE over injected git/clock/iteration
-        │  per iteration
-        ▼
-autonomous/iteration.ts     one fresh session via runEffect, AgentLoopConfig.unattended
-autonomous/prompt.ts        the iteration prompt (a USER message, never system content)
-tools/finish-iteration.ts   how an iteration ends
-autonomous/envelope.ts      answers permission asks without a human
-autonomous/sandbox.ts       bubblewrap plan for unattended bash / --verify / shells
-        │
-        ▼
-autonomous/git.ts           commit / reset / worktree / diffstat
-autonomous/night-store.ts   notes.md, decisions.jsonl, iterations.jsonl (secret-scrubbed)
-autonomous/run-store.ts     manifest.json (atomic), FREECODE_RUNS_HOME
-autonomous/quota-wait.ts    planQuotaWait — pure wait policy
-autonomous/inhibit.ts       one killable systemd-inhibit / caffeinate child
-autonomous/report.ts        pure fold → report.md
-autonomous/night-ops.ts     status / list / stop / crash reconciliation
-autonomous/supervisor.ts    detached / scheduled worker launch
+## The beginner mental model
+
+Do not think “leave one agent conversation running forever.” A night run is a
+series of small, bounded attempts:
+
+```text
+Your objective
+   ↓
+Fresh agent session completes one small step
+   ↓
+Verify it, commit it, and record the result
+   ↓
+Start the next fresh session—or stop for a limit, failure, or success
+   ↓
+Morning report + a branch for you to review
 ```
 
-`orchestrator.ts` makes every decision and does no IO of its own. Git, the
-clock, sleeping, the iteration runner, `--verify` and the stop flag are all
-passed in, so `orchestrator.test.ts` can drive a whole night on a fake clock.
-`night-run.ts` contains no policy. It only wires the real implementations
-together.
+This is **bounded autonomy**: the agent may work without you watching, but it
+is constrained by limits, a permission envelope, Git isolation, and an audit
+trail. A passing verification command is evidence, not approval; FreeCode never
+merges the branch for you.
 
-## The one seam in the agent loop
+## What `freecode night` does
 
-The loop knows about unattended runs through exactly one field:
-`AgentLoopConfig.unattended` (`UnattendedContext`). When it is set:
+```bash
+freecode night "reduce the TUI render cost" --until 07:00 --verify "pnpm test"
+```
 
-- **Permission asks** go to `decideUnattendedAsk` instead of the bus.
-- **Tools** can see it via `ToolContext.unattended`. `question` answers itself
-  and records the ask. `bash` wraps its command in the sandbox plan.
-- **`finish_iteration`** is added to the provider's tool list by
-  `unattendedToolDefs`. `getToolDefs` filters it out, so attended sessions never
-  see it.
-- **The run ends** once `unattended.finish` is set, after the current tool batch.
+For each iteration, FreeCode:
 
-The envelope's deny rules are added to the session's DENY tier via
-`PermissionSettingsManager.addSessionDeny`. Deny beats allow, so a user's
-`Bash(git:*)` allow cannot widen them. `deniedSegment` / `normalizeSegment`
-split chained commands and strip env prefixes and program paths before
-matching. That fix lives in the envelope, not in `permission/rules.ts`, because
-`docs/DECISIONS.md` records that allow-rule prefix matching deliberately refuses
-compound commands, and the envelope is the only caller whose rules are all
-denials. The three bypasses this closes were found by `evals/night.jsonl`.
+1. Starts a fresh session with the objective, notes from earlier iterations,
+   and a `finish_iteration` tool.
+2. Lets the model work within the unattended permission envelope.
+3. Runs `--verify`, if you supplied it.
+4. Commits a successful, verified step to `night/<objective-slug>`.
+5. Resets failed or incomplete work, records why, and either retries or stops.
 
-## Failure evidence (Phase 0)
+The **orchestrator**, not the model, owns commits, resets, limits, and the final
+stop decision. The model reports its result through `finish_iteration`; it
+cannot directly commit, push, switch branches, or declare an unchecked change
+successful.
 
-`agent/recovery/manager.ts` classifies failures:
+## Safety boundaries
 
-- `QuotaExhaustedError` carries `scope` (`window` / `credits` / `auth` /
-  `unknown`) and `resetAt`.
-- `quotaResetAt` reads every common reset-header spelling and takes the soonest
-  future one.
-- `classifyLoopFailure` fills `LoopResult.failure` at all five loop exits,
-  including the three that report `success: true`.
-- `model.error` rollout events carry `rateLimitHeaders` (names and values only,
-  no body).
-
-A `question` with no frontend subscribed is rejected at once rather than
-waiting the 30-minute prompt timeout.
-
-## Quota waits
-
-`planQuotaWait` is a pure function. The outcome for each input:
-
-| Input | Plan |
+| Boundary | What it protects |
 | --- | --- |
-| `credits` | abort (`permanent_error`) |
-| `unknown` after 3 probes | abort (`permanent_error`) |
-| stated reset in the future | wait until reset + 60s |
-| no usable reset | probe after 1, 2, 4, …, max 30 min |
-| wait would exceed `maxWaitMs` | abort (`wait_budget`) |
-| wait would cross `--until` | abort (`deadline`) |
+| Limits | stops at `--until`, `--max-iterations`, `--max-usd`, failure, or cancellation |
+| Fresh sessions | prevents one enormous context window from accumulating overnight |
+| Dedicated branch | keeps work off your current branch and never merges automatically |
+| Optional worktree | `--worktree` lets the run use a separate checkout while you keep working |
+| Permission envelope | refuses dangerous Git, publishing, remote, and system-changing commands |
+| Optional sandbox | on Linux, Bubblewrap confines unattended shell writes to the run tree by default |
+| Verification gate | `--verify` must exit successfully before an iteration is committed |
+| Report and logs | lets a person inspect decisions, commits, failures, waits, and remaining questions |
 
-A single wait is capped at 24h. Both budgets are checked against what the wait
-**would** cost, before it starts. A wait retries the same iteration number and
-does not count towards `maxConsecutiveFailures`. `sleepUntil` in `night-run.ts`
-re-checks the clock every 60s, for two reasons: a single `setTimeout` overflows
-past 2^31 ms, and a suspended machine resumes to a timer that never fired.
+The envelope is a guard rail, not a complete security sandbox. It blocks known
+irreversible and outward-facing commands, while the branch/worktree, reset
+policy, and optional Bubblewrap sandbox provide separate layers of protection.
 
-## Stop reasons
+## Limits, failures, and quota waits
 
-`objective_met`, `max_iterations`, `deadline`, `budget_usd`,
-`consecutive_failures`, `permanent_error`, `wait_budget`, `interrupted`,
-`cancelled`. An iteration can fail with `no_finish`, `no_op`, `turn_cap`,
-`stuck`, `timeout`, `commit_failed`, `verify_failed`, `provider`, `quota` or
-`auth`. Each iteration is capped at `MAX_TURNS_PER_ITERATION` (60) and
-`ITERATION_TIMEOUT_MS` (30 min).
+The orchestrator stops for an objective being met, an iteration or cost limit,
+a deadline, repeated failures, a permanent provider error, cancellation, or a
+hard interruption.
 
-## Storage and the report
+A usage-window quota is treated differently from a bad API key or exhausted
+credits. When the provider gives a future reset time, FreeCode can wait and
+retry the **same** iteration. It caps both one wait and total wait time; it can
+also retry the first spent window using `--fallback-model provider/model`.
+Credits and authentication failures are permanent errors because waiting is not
+expected to fix them.
 
-`~/.freecode/runs/<id>/` holds `manifest.json`, `notes.md`,
-`iterations.jsonl`, `decisions.jsonl`, `report.md` and, for detached runs,
-`worker.log`. `scrubFields` redacts each string field **before** it is
-serialised. An earlier version scrubbed the finished JSON line, which produced
-invalid JSON, so the reader skipped it and a redacted `needs_human` item
-disappeared from the report.
+This is **failure classification**: different error categories get different
+recovery behavior instead of one blind retry rule.
 
-`report.ts` is a pure fold over the manifest and both logs. That is how
-`night report` can regenerate the report for a run that crashed. Crash
-detection is `pidAlive()` (`kill(pid, 0)`, where `EPERM` counts as alive),
-reconciled when the manifest is read and then saved. It applies to `running`
-and `pending` manifests. A finished run is never re-judged. `night stop` sets
-`cancelRequested` in the manifest and never sends a signal, because killing a
-process mid-write is how manifests get corrupted.
+## Starting, observing, and stopping a run
 
-## Detached worker and sandbox (Phase 5)
-
-`launchDetachedNight` writes a `pending` manifest **before** spawning, so a fast
-worker's live manifest is never overwritten by the parent's provisional one.
-It then re-runs the current invocation (`currentInvocation()` handles both
-script and single-file binaries) as a detached process, with stdout and stderr
-sent to `worker.log`. Three environment variables hand the run over:
-`FREECODE_NIGHT_WORKER=1`, `FREECODE_NIGHT_RUN_ID`, and
-`FREECODE_NIGHT_SCHEDULED_FOR`. A worker always runs in a dedicated worktree. A
-scheduled worker inhibits sleep while waiting for its start time and polls the
-manifest for `cancelRequested` every second.
-
-`sandboxPlan` builds the bubblewrap command:
-
-```
-bwrap --die-with-parent --new-session --unshare-{pid,ipc,uts,cgroup-try}
-      --ro-bind / /  --tmpfs $HOME  --tmpfs /tmp
-      [--ro-bind <main .git> <main .git>]      # worktree runs only
-      --bind <tree> <tree>
-      --setenv HOME /tmp  --proc /proc  --dev /dev  --chdir <cwd>
-      /bin/bash -c <command>
+```text
+freecode night "<objective>" --until 07:00
+freecode night status [run-id-or-branch]
+freecode night report [run-id-or-branch]
+freecode night list
+freecode night stop [run-id-or-branch]
 ```
 
-`sandboxEnvironment` drops variables whose names match
-`KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH`. `bubblewrapAvailable`
-checks by running a minimal sandbox, not `bwrap --version`: `--version` succeeds
-even when the kernel forbids the user namespace that a real sandbox needs. The
-network is shared on purpose.
+`night stop` writes a cancellation request to the manifest. The runner checks
+it at an iteration boundary rather than killing itself mid-write. `status` and
+`list` reconcile a manifest whose recorded process id has died, marking the run
+as crashed instead of falsely reporting it as still running.
 
-A worktree's `.git` is a file that points at `<main>/.git/worktrees/<name>`.
-That directory is usually under the hidden `$HOME`, so `worktreeGitDir()`
-resolves the repository's common git dir and mounts it read-only. Without that
-mount, every git command inside a detached run failed with "not a git
-repository".
+`--detach` starts a detached worker so the terminal can close. `--at` schedules
+a detached worker for a future local time, duration, or ISO timestamp. Detached
+workers use a dedicated worktree, write their output to `worker.log`, and can
+be observed with the same status/report commands.
 
-**The process directory must be the run tree.** The agent loop gives every tool
-`cwd: process.cwd()` (`agent/loop.ts`). `night-run.ts` therefore calls
-`process.chdir()` into the worktree once it exists. Before this fix, bash and
-relative file paths resolved against the user's own checkout. The sandbox
-refused all of those calls, but with `--no-sandbox` they would have run there.
-The first live detached run found both problems.
+## Storage and the morning report
 
-## Frontends
+Each run stores durable state under:
 
-IPC `night.list | report | stop` (`server.ts`) only read what a separate night
-process left on disk. They start none of the backend, so reading a finished run
-never spins up providers or MCP servers. `night.list` counts `needsHuman` in
-core, so that each frontend doesn't decide for itself what "needs you" means.
-The TUI's `/night` is `apps/tui/src/components/night-panel.ts`.
+```text
+~/.freecode/runs/<run-id>/
+├── manifest.json       status, limits, usage, branch, process details
+├── notes.md            carry-forward notes for later iterations
+├── iterations.jsonl    completed iterations and quota waits
+├── decisions.jsonl     unattended asks, denials, choices, needs-human items
+├── report.md           review summary; can be regenerated
+└── worker.log          detached worker output, when applicable
+```
 
-## Tests
+`manifest.json` is written atomically (temporary file, then rename), so readers
+do not see a half-written document. The report is a **pure fold** over the
+manifest and JSONL logs. That means `freecode night report` can regenerate a
+report after a crash instead of relying on a single final write that may never
+have happened.
 
-`orchestrator.test.ts`, `quota-wait.test.ts`, `envelope.test.ts`,
-`git.test.ts` (a real repo in a tmpdir), `night-store.test.ts`,
-`report.test.ts`, `night-ops.test.ts`, `sandbox.test.ts`,
-`supervisor.test.ts`, `tools/finish-iteration.test.ts`,
-`cli/commands/night.test.ts`, and the TUI's `night-panel.test.ts`. The paid
-eval suite is `evals/night.jsonl` (5 cases, `unattended: true`). Its
-2026-09-28 run on MiniMax-M3 scored 5/5, with `finish_iteration` called in
-14/15 trials.
+The report tells you what happened; it does not claim the work is correct. It
+includes commits, verification status, failures, quota waits, decisions, items
+that need a human, and commands to inspect or discard the `night/*` branch.
 
-Known gaps are listed on the [user guide](/guides/overnight-runs#known-gaps).
+## Architecture map
+
+| Area | Main code |
+| --- | --- |
+| CLI flags and subcommands | `apps/core/src/cli/commands/night.ts` |
+| Real-world wiring and preflight | `apps/core/src/cli/commands/night-run.ts` |
+| Pure iteration state machine | `apps/core/src/autonomous/orchestrator.ts` |
+| One fresh agent session | `apps/core/src/autonomous/iteration.ts` |
+| Permission envelope | `apps/core/src/autonomous/envelope.ts` |
+| Git branch, commit, reset, worktree operations | `apps/core/src/autonomous/git.ts` |
+| Quota-wait policy | `apps/core/src/autonomous/quota-wait.ts` |
+| Manifest and JSONL storage | `apps/core/src/autonomous/run-store.ts`, `night-store.ts` |
+| Report, status, crash reconciliation | `apps/core/src/autonomous/report.ts`, `night-ops.ts` |
+| Detached/scheduled worker and sandbox | `apps/core/src/autonomous/supervisor.ts`, `sandbox.ts` |
+
+## What is not included
+
+`freecode night` is explicitly user-started. It is not an ambient daemon that
+decides to edit projects on its own schedule. It does not merge to a default
+branch, force-push, or turn verification into human approval.
+
+## Interview vocabulary
+
+- **Bounded autonomy:** unattended work that has explicit resource and safety
+  limits.
+- **Orchestrator:** a controller that coordinates iterations and owns policy
+  decisions instead of leaving them to the model.
+- **Fresh-session iteration:** start each step with a clean session plus a
+  concise handoff, limiting context growth and carrying only useful learning.
+- **Permission envelope:** a stricter policy used only while nobody is present
+  to approve actions.
+- **Defense in depth:** branch isolation, permission checks, verification,
+  limits, sandboxing, and audit logs overlap rather than relying on one guard.
+- **Atomic write:** write a temporary file then rename it, preventing partial
+  persistent state.
+- **Pure fold:** derive a report from durable events; regenerate it reliably
+  after a crash.
+- **Human-in-the-loop review:** automation prepares committed work and evidence;
+  a person still reviews and approves it.
+
+Related: [Agent loop](/internals/agent-loop), [Permission engine](/internals/permissions),
+[Sessions, store & rollout](/internals/sessions), and [Provider layer](/internals/providers).

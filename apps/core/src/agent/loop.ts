@@ -277,7 +277,7 @@ export interface AgentLoopConfig {
   /**
    * Redirection cap from an autonomous run's budget (`RunLimits.maxRedirects`),
    * which takes precedence over the user's `redirect.maxPerRun` setting. Unset
-   * for interactive runs. Spec `2026-08-10-autonomous-runs-design.md` §4.3.
+   * for interactive runs. See `2026-09-28-overnight-runs.md`.
    */
   budgetMaxRedirects?: number;
   /**

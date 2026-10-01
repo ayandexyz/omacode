@@ -6,7 +6,7 @@
 // a detached child that can be killed at any moment, and a half-written
 // manifest is indistinguishable from a corrupt one — the file is the only place
 // a crashed run's state survives.
-// Spec: docs/specs/2026-08-10-autonomous-runs-design.md §4.2
+// Spec: docs/specs/2026-09-28-overnight-runs.md
 // =============================================================================
 
 import * as fs from "fs";

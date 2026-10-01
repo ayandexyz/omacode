@@ -3,8 +3,8 @@
 > **Status:** Built through Phase 5 (2026-09-28). The phase notes in §8 are the
 > implementation record; remaining measurements and open questions are called out there.
 > **Branch:** `autonomous`.
-> **Supersedes:** Phases 1–5 of `2026-08-10-autonomous-runs-design.md`. Its Phase 0
-> (`autonomous/types.ts`, `budget.ts`, `run-store.ts`) is kept and extended; its
+> **Foundation:** `autonomous/types.ts`, `budget.ts`, and `run-store.ts` provide
+> shared manifest, budget, and storage primitives; this specification extends them.
 > §4.4 (detached child process), §4.8 (shell allowlisted to the verify command
 > only) and §0's "FreeCode has no OAuth" premise are replaced — see §3.
 > **Prior art:** `gnhf` ("good night, have fun"), MIT, TypeScript, local clone

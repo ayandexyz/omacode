@@ -13,7 +13,7 @@
 > candidate optimization directions" when the agent stalls or enters unproductive cycles.
 > **Extends:** the loop-health heuristics in `agent/loop.ts` + `agent/types.ts:200`.
 > **Measured by:** `specs/2026-08-23-eval-harness.md` (Phases 0–1, shipped).
-> **Feeds:** `specs/2026-08-10-autonomous-runs-design.md` — a Tier A run needs a
+> **Feeds:** `specs/2026-09-28-overnight-runs.md` — an unattended run needs a
 > supervisor; this is that supervisor, built and measured first in the attended case.
 > **Explicitly not:** a candidate lineage, a scored archive, auto-commits, or a second
 > agent with tools. See §10.
@@ -374,7 +374,7 @@ The tooling is built and the measurement was attempted; the criterion cannot be
 evaluated yet, so D8's default stays `false`. See §9.1.
 
 **Phase 3 — half done 2026-08-27; the rest still deferred.**
-Autonomous-runs integration lands with `2026-08-10-autonomous-runs-design.md`, not here.
+Overnight-run integration lands with `2026-09-28-overnight-runs.md`, not here.
 It has two seams, and only one of them was buildable:
 
 - **Per-run cap from the run budget — ✅ built.** `RunLimits.maxRedirects` (default 2,

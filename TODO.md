@@ -474,13 +474,6 @@ spec's §12; these are the parts that are actionable independently of it.
       unrelated LLM calls. An `invoke_agent` root span plus
       `gen_ai.conversation.id = sessionId` makes it one tree. Cheap — both are
       attribute additions in a file that already builds spans by hand.
-- [ ] **Two specs promise a verifier that does not exist.**
-      `2026-08-10-autonomous-runs-design.md` says the "verifier/evaluator decides
-      completion when configured gates" are set, and
-      `2026-08-08-continual-harness-design.md` lets the agent rewrite its own
-      harness with no way to measure whether the rewrite helped. Both are blocked
-      on the eval spec's Phase 1, and both should say so.
-
 ### Docs findings (writing `/internals/eval` — 2026-08-23)
 
 - [ ] **`evalsDir()` is CWD-relative** (`eval/dataset.ts:19`,

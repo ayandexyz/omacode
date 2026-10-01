@@ -1,6 +1,6 @@
 // =============================================================================
 // Autonomous run types — RunManifest, RunLimits, RunStatus, TaskCard, GateResult
-// Spec: docs/specs/2026-08-10-autonomous-runs-design.md §4.2, §4.3
+// Spec: docs/specs/2026-09-28-overnight-runs.md
 //
 // PHASE 0: types + budget + storage only. Nothing here starts an agent, spawns
 // a process, or runs a gate command. A run is deliberately not a new kind of

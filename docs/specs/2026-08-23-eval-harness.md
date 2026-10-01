@@ -10,7 +10,7 @@ spec: `~/Projects/githubProjects/waku-agent`. Primary files
 **Extends:** `2026-08-10-agent-observability.md` — this spec adds no new instrumentation.
 Every scorer folds the event log that spec already produces.
 **Related specs:** `2026-08-08-continual-harness-design.md` (Layer 1 has no way to tell
-whether a harness edit helped), `2026-08-10-autonomous-runs-design.md` (§ gates need
+whether a harness edit helped), `2026-09-28-overnight-runs.md` (§ gates need
 something to gate on), `2026-08-05-token-efficiency.md`.
 
 ---
@@ -45,7 +45,7 @@ Three concrete things are currently unfalsifiable in this repo:
    agent edit its own memories, skills, and subagent definitions from evidence. An agent
    that rewrites its own harness with no way to measure whether the rewrite helped is a
    random walk with extra steps. The continual harness needs this spec to be honest.
-3. **`2026-08-10-autonomous-runs-design.md` §Tier A promises budget-capped unattended
+3. **`2026-09-28-overnight-runs.md` promises budget-capped unattended
    runs** whose completion "the verifier/evaluator decides." There is no verifier. Today
    that sentence describes a component that does not exist.
 
