@@ -8,19 +8,25 @@
 //   - ships `quickjs.wasm` as a loose file beside the executable (like
 //     `web-ui/` and the onnx libs — `bun build --compile` bundles JS, not
 //     assets), and
-//   - embeds `codemode/worker.js` as an extra entrypoint, which Bun resolves
-//     by its path relative to the build root.
+//   - embeds `codemode/worker.js` as an extra entrypoint. Bun roots embedded
+//     files at the entrypoints' common ancestor — `apps/` (entry.ts is in
+//     apps/tui) — under its virtual fs, `/$bunfs/root` (`B:\~BUN\root` on
+//     Windows). A relative specifier does NOT resolve there (measured with
+//     node:worker_threads, Bun 1.3.14); an absolute one does. The bundled code
+//     itself lives at that root, so the root is the dirname of its own
+//     `import.meta.url`, which keeps this platform-neutral.
 // =============================================================================
 
 import * as path from "path";
+import { fileURLToPath } from "url";
 import {
   CodemodeSandbox,
   loadQuickJSWasm,
   type CodemodeSandboxOptions,
 } from "@earendil-works/pi-codemode";
 
-/** The worker's specifier inside the compiled binary: its build-root-relative path. */
-export const BUNDLED_WORKER_SPECIFIER = "./apps/core/dist/codemode/worker.js";
+/** The worker inside the compiled binary, relative to the embedded root (`apps/`). */
+export const BUNDLED_WORKER_PATH = "core/dist/codemode/worker.js";
 export const BUNDLED_WASM_FILE = "quickjs.wasm";
 
 export interface CodemodeRuntime {
@@ -32,11 +38,12 @@ export interface CodemodeRuntime {
 export function resolveCodemodeRuntime(
   bundled: boolean,
   execPath: string,
+  moduleUrl: string,
 ): CodemodeRuntime {
   if (!bundled) return {};
   return {
     wasmPath: path.join(path.dirname(execPath), BUNDLED_WASM_FILE),
-    workerUrl: BUNDLED_WORKER_SPECIFIER,
+    workerUrl: path.join(path.dirname(fileURLToPath(moduleUrl)), BUNDLED_WORKER_PATH),
   };
 }
 
@@ -47,6 +54,7 @@ export function createCodemodeSandbox(
   const runtime = resolveCodemodeRuntime(
     process.env.FREECODE_BUNDLED === "1",
     process.execPath,
+    import.meta.url,
   );
   return new CodemodeSandbox({
     ...options,

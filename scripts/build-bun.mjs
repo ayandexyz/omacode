@@ -14,6 +14,7 @@ import {
   readdirSync,
   copyFileSync,
   cpSync,
+  realpathSync,
 } from "fs";
 import { createRequire } from "module";
 import { fileURLToPath } from "url";
@@ -78,7 +79,17 @@ const args = [
   `process.env.FREECODE_BUNDLED=${JSON.stringify("1")}`,
 ];
 if (target) args.push("--target", target);
-args.push("--outfile", outfile, resolve(repoRoot, "apps/tui/src/entry.ts"));
+args.push(
+  "--outfile",
+  outfile,
+  resolve(repoRoot, "apps/tui/src/entry.ts"),
+  // Codemode's sandbox runs in a worker thread; a worker file has to be its
+  // own entrypoint to exist inside the binary. Bun roots embedded files at the
+  // entrypoints' common ancestor (apps/), so core finds it at
+  // <embedded root>/core/dist/codemode/worker.js (BUNDLED_WORKER_PATH in
+  // codemode/runtime.ts) — move either entrypoint and that path changes.
+  resolve(repoRoot, "apps/core/dist/codemode/worker.js"),
+);
 
 // Preflight before the (slow) compile: refuse to package without the SPA.
 assertWebUiBuilt();
@@ -112,6 +123,11 @@ copyOnnxSharedLibs(outfile, target);
 // fatal on a phone, whose client has no UI of its own and renders this
 // bundle in a WebView. Hence the hard failure rather than a warning.
 copyWebUi(outfile);
+
+// Codemode's QuickJS VM is a .wasm file read from disk at sandbox start, so
+// like the onnx libs and web-ui it travels as a loose file beside the binary
+// (BUNDLED_WASM_FILE in apps/core/src/codemode/runtime.ts). Platform-neutral.
+copyQuickJSWasm(outfile);
 
 /**
  * `--external` flags for the @anush008/tokenizers bindings that do NOT match
@@ -198,6 +214,20 @@ function assertWebUiBuilt() {
       "web UI 404s: a blank screen for `freecode web` and for every phone " +
       "client, with no error on either side.",
   );
+}
+
+function copyQuickJSWasm(binOutfile) {
+  // Resolve from pi-codemode's REAL path: pnpm links it, and quickjs-wasi is
+  // only reachable from inside the .pnpm store, not from the symlink.
+  const coreRequire = createRequire(
+    realpathSync(
+      resolve(repoRoot, "apps/core/node_modules/@earendil-works/pi-codemode/package.json"),
+    ),
+  );
+  const src = coreRequire.resolve("quickjs-wasi/quickjs.wasm");
+  const dest = join(dirname(binOutfile), "quickjs.wasm");
+  copyFileSync(src, dest);
+  console.log(`[bun] copied QuickJS wasm → ${dest}`);
 }
 
 function copyWebUi(binOutfile) {

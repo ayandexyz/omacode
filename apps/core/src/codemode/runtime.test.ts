@@ -2,21 +2,20 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import * as path from "path";
 import {
-  BUNDLED_WORKER_SPECIFIER,
   createCodemodeSandbox,
   resolveCodemodeRuntime,
 } from "./runtime.js";
 
 describe("resolveCodemodeRuntime", () => {
   it("uses pi-codemode's defaults outside the compiled binary", () => {
-    assert.deepEqual(resolveCodemodeRuntime(false, "/usr/bin/node"), {});
+    assert.deepEqual(resolveCodemodeRuntime(false, "/usr/bin/node", import.meta.url), {});
   });
 
-  it("points at the loose wasm and the embedded worker inside it", () => {
+  it("points at the loose wasm and the worker under the embedded root", () => {
     const exe = path.join("/opt", "freecode", "freecode");
-    assert.deepEqual(resolveCodemodeRuntime(true, exe), {
+    assert.deepEqual(resolveCodemodeRuntime(true, exe, "file:///$bunfs/root/freecode"), {
       wasmPath: path.join("/opt", "freecode", "quickjs.wasm"),
-      workerUrl: BUNDLED_WORKER_SPECIFIER,
+      workerUrl: "/$bunfs/root/core/dist/codemode/worker.js",
     });
   });
 });
