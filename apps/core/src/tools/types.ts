@@ -1,3 +1,14 @@
+/** A nested call's result as a script sees it: the full output, or the error. */
+export interface NestedToolResult {
+  output: string;
+  error?: string;
+}
+
+export type NestedToolCaller = (
+  tool: string,
+  args: Record<string, unknown>,
+) => Promise<NestedToolResult>;
+
 export interface ToolContext {
   cwd: string;
   sessionId?: string;
@@ -25,6 +36,14 @@ export interface ToolContext {
    * Absent in every attended session.
    */
   unattended?: import("../autonomous/types.js").UnattendedContext;
+  /**
+   * Set by the loop only for a `codemode` call while codemode is enabled: runs
+   * a tool call from inside the script through the loop's full pipeline
+   * (role, hooks, mode, rules, permission prompt, envelope) — never straight
+   * to the orchestrator, or a script would bypass all of them (spec
+   * 2026-10-05-codemode.md §4.2).
+   */
+  callTool?: NestedToolCaller;
   fileCache?: FileCache;
   permissionProfile?: PermissionProfile;
   hooks?: unknown;

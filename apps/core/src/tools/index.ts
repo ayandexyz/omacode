@@ -19,6 +19,7 @@ import { LsTool } from "./ls.js";
 import { OutputTool } from "./output.js";
 import { MemoryTool } from "./memory.js";
 import { FinishIterationTool } from "./finish-iteration.js";
+import { CodemodeTool } from "./codemode.js";
 import {
   createToolOrchestrator,
   type ToolOrchestrator,
@@ -90,6 +91,9 @@ export const tools = {
   // Unattended runs only. Deliberately absent from the provider-facing tool
   // list unless the loop has an unattended context — see defs-cache.ts.
   finish_iteration: FinishIterationTool,
+  // Off by default; offered only by a loop with codemode enabled — see
+  // defs-cache.ts `withCodemode`.
+  codemode: CodemodeTool,
 } as const;
 
 export type ToolId = keyof typeof tools;

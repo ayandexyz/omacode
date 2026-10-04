@@ -38,9 +38,16 @@ function ensureSubscribed(): void {
  */
 export const UNATTENDED_ONLY_TOOLS = new Set(["finish_iteration"]);
 
+/**
+ * Off by default (spec 2026-10-05-codemode.md §4.9), so kept out of the shared
+ * list and added back by `withCodemode` for a loop that has it enabled. A
+ * session that never turns it on sends the same tool list as before.
+ */
+export const CODEMODE_TOOL = "codemode";
+
 function buildAll(): ProviderToolDef[] {
   return listTools()
-    .filter((t) => !UNATTENDED_ONLY_TOOLS.has(t.id))
+    .filter((t) => !UNATTENDED_ONLY_TOOLS.has(t.id) && t.id !== CODEMODE_TOOL)
     .map((t) => {
       const toolDef = getTool(t.id);
       return {
@@ -85,18 +92,24 @@ export function getToolDefs(mode?: AgentMode): ProviderToolDef[] {
  * and an iteration is minutes long.
  */
 export function unattendedToolDefs(mode?: AgentMode): ProviderToolDef[] {
-  const extra = [...UNATTENDED_ONLY_TOOLS].flatMap((id) => {
-    const tool = getTool(id);
-    if (!tool) return [];
-    return [
-      {
-        name: id,
-        description: tool.description,
-        parameters: tool.schemas.parameters as unknown as Record<string, unknown>,
-      },
-    ];
-  });
-  return [...getToolDefs(mode), ...extra];
+  return [...getToolDefs(mode), ...[...UNATTENDED_ONLY_TOOLS].flatMap(defFor)];
+}
+
+/** `defs` plus the `codemode` tool, appended so the list's prefix is unchanged. */
+export function withCodemode(defs: ProviderToolDef[]): ProviderToolDef[] {
+  return [...defs, ...defFor(CODEMODE_TOOL)];
+}
+
+function defFor(id: string): ProviderToolDef[] {
+  const tool = getTool(id);
+  if (!tool) return [];
+  return [
+    {
+      name: id,
+      description: tool.description,
+      parameters: tool.schemas.parameters as unknown as Record<string, unknown>,
+    },
+  ];
 }
 
 export function invalidateToolDefs(): void {

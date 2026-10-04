@@ -28,6 +28,10 @@ const READONLY_TOOLS = new Set([
   // Polling a background shell only reads a buffer core already holds.
   // killbash is deliberately absent: stopping a process is a side effect.
   "bashoutput",
+  // No capability of its own: every tool a script calls is checked against
+  // the mode on its own (spec 2026-10-05-codemode.md §4.6), so in a read-only
+  // mode a script can only read.
+  "codemode",
 ]);
 
 const NETWORK_TOOLS = new Set(["webfetch", "websearch"]);
