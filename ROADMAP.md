@@ -178,3 +178,11 @@ headless `freecode run` that should stop itself or park a prompt.
       `CONNECTING` (`use-websocket.ts:19`, `:61`). The TUI's
       `[250, 1_000, 3_000]`-then-give-up budget (`apps/tui/src/ipc/client.ts:87`)
       is right for a local child process but wrong for a network client.
+
+## Codemode (pi parity — added 2026-10-05)
+
+- [ ] **Codemode tool** — the model writes a JavaScript script that calls tools in a
+      QuickJS sandbox; only the script's output reaches the transcript. Nested calls
+      must go through `AgentLoop.executeTool()` so permissions, hooks and the night
+      envelope still apply. Off by default until `eval ab` shows a cost-per-passed-task
+      saving. Spec `docs/specs/2026-10-05-codemode.md` (Phases 0–3).
