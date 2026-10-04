@@ -64,8 +64,8 @@ const DESCRIPTION = `Run a JavaScript script that calls your other tools, and ge
 
 The script is the body of an async function: top-level await and return work. It runs in a sandbox with no Node APIs, file system, network or timers; it reaches the outside world only through tools.
 
-- tools.<name>(args): call any tool you can call directly, with the same arguments. Names with characters invalid in identifiers use _ (mcp__my-server__x is tools.mcp__my_server__x). Resolves to the tool's full text output (not truncated); rejects with an Error carrying the tool's error or denial. Use Promise.allSettled to keep partial results. Not callable: ${[...NOT_CALLABLE_FROM_CODEMODE].filter((t) => t !== "finish_iteration").join(", ")}.
-- text(value), console.log(...): add to the output. return value adds it too. exit() ends the script.
+- tools.<name>(args): call any tool you can call directly, with the same arguments. Names with characters invalid in identifiers use _ (mcp__my-server__x is tools.mcp__my_server__x). Every call resolves to a STRING — the same text the tool gives you directly, but not truncated (glob/grep/ls return one path or match per line: split("\\n")). It rejects with an Error carrying the tool's error or denial. Use Promise.allSettled to keep partial results. Not callable: ${[...NOT_CALLABLE_FROM_CODEMODE].filter((t) => t !== "finish_iteration").join(", ")}.
+- text(value), console.log(...): add to the output. return value adds it too. exit() ends the script. Do not redeclare tools, text, store, load or ALL_TOOLS.
 - ALL_TOOLS: [{ name, description }] for every callable tool, including MCP tools. searchTools(query, { limit? }) ranks them; describeTool(name) returns one's TypeScript declaration.
 - store(key, value) / load(key): keep small JSON values (ids, cursors, summaries) for later codemode calls in this session; storing undefined deletes. Kept only if the script succeeds.
 
