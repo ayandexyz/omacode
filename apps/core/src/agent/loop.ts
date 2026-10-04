@@ -3193,10 +3193,12 @@ export class AgentLoop {
       abort: this.abort.signal,
       // Only a top-level codemode call gets one; nested codemode is refused
       // before it gets here (NOT_CALLABLE_FROM_CODEMODE).
-      callTool:
-        toolCall.tool === "codemode" && !parentCallId && this.codemodeEnabled()
-          ? this.nestedToolCaller(toolCall)
-          : undefined,
+      ...(toolCall.tool === "codemode" && !parentCallId && this.codemodeEnabled()
+        ? {
+            callTool: this.nestedToolCaller(toolCall),
+            codemodeStore: await this.loadCodemodeStore(),
+          }
+        : {}),
     };
 
     let result: ToolResult;
@@ -3447,6 +3449,29 @@ export class AgentLoop {
       this.codemodeOn = loadCodemodeEnabled(this.state.projectPath);
     }
     return this.codemodeOn;
+  }
+
+  // ===========================================================================
+  // PRIVATE: loadCodemodeStore()
+  // The latest `store()` snapshot on the session's active path (spec §5).
+  // Lost if compaction trimmed every codemode message that carried one.
+  // ===========================================================================
+  private async loadCodemodeStore(): Promise<Record<string, unknown>> {
+    if (!this.sessionStore) return {};
+    try {
+      const messages = await this.sessionStore.getMessages(
+        this.state.sessionId,
+        this.state.projectPath,
+      );
+      for (let i = messages.length - 1; i >= 0; i--) {
+        for (const part of messages[i].parts) {
+          if (part.codemodeStore) return part.codemodeStore;
+        }
+      }
+    } catch (error) {
+      logger.warn(`[AgentLoop] codemode store not loaded: ${String(error)}`);
+    }
+    return {};
   }
 
   // ===========================================================================
@@ -4063,6 +4088,7 @@ export class AgentLoop {
           // Persist the context-capped output (see appendToolMessage caller):
           // this is reloaded into history and re-sent to the provider.
           result: result.modelOutput || result.error || "",
+          ...codemodeStoreOf(result),
         },
       ],
       timestamp: Date.now(),
@@ -4161,3 +4187,12 @@ export const createAgentLoopEffect = (
       recovery,
     });
   });
+
+/** The `store()` snapshot a successful codemode result carries, if any. */
+function codemodeStoreOf(
+  result: ToolResult,
+): { codemodeStore?: Record<string, unknown> } {
+  const meta = result.structuredData as { codemodeStore?: unknown } | undefined;
+  const snap = meta?.codemodeStore;
+  return snap && typeof snap === "object" ? { codemodeStore: snap as Record<string, unknown> } : {};
+}

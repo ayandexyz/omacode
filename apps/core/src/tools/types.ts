@@ -44,6 +44,11 @@ export interface ToolContext {
    * 2026-10-05-codemode.md §4.2).
    */
   callTool?: NestedToolCaller;
+  /**
+   * Values earlier codemode scripts kept with `store()`, as of the session's
+   * active path. Set by the loop alongside `callTool` (spec §5).
+   */
+  codemodeStore?: Readonly<Record<string, unknown>>;
   fileCache?: FileCache;
   permissionProfile?: PermissionProfile;
   hooks?: unknown;

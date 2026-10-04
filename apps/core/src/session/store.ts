@@ -73,6 +73,14 @@ export interface SerializedMessage {
     /** Media type, e.g. image/png (image parts only). */
     mediaType?: string;
     altText?: string;
+    /**
+     * Codemode only: the whole `store()` map after this script, written when
+     * the script succeeded and changed it. The next script loads the latest
+     * one on the active path, so resume and `/tree` branches see exactly the
+     * values written on their own path (spec 2026-10-05-codemode.md §5).
+     * Never sent to the provider — history is rebuilt field by field.
+     */
+    codemodeStore?: Record<string, unknown>;
   }>;
   timestamp: number;
   /**

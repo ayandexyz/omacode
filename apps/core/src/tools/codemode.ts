@@ -13,10 +13,12 @@
 import type { ToolContext } from "./types.js";
 import type { Tool, ToolExecutionResult, JsonSchema } from "./tool.types.js";
 import { buildTool } from "./factory.js";
-import { getToolDefs } from "./defs-cache.js";
+import { getToolDefs, type ProviderToolDef } from "./defs-cache.js";
+import { discoveryGlobals } from "../codemode/discovery.js";
 import {
   CodemodeSourceError,
   parseCodemodeSource,
+  type CodemodeStoreWrites,
   type CodemodeTool as SandboxTool,
 } from "@earendil-works/pi-codemode";
 import { createCodemodeSandbox } from "../codemode/runtime.js";
@@ -64,7 +66,8 @@ The script is the body of an async function: top-level await and return work. It
 
 - tools.<name>(args): call any tool you can call directly, with the same arguments. Names with characters invalid in identifiers use _ (mcp__my-server__x is tools.mcp__my_server__x). Resolves to the tool's full text output (not truncated); rejects with an Error carrying the tool's error or denial. Use Promise.allSettled to keep partial results. Not callable: ${[...NOT_CALLABLE_FROM_CODEMODE].filter((t) => t !== "finish_iteration").join(", ")}.
 - text(value), console.log(...): add to the output. return value adds it too. exit() ends the script.
-- ALL_TOOLS: [{ name, description }] for every callable tool, including MCP tools.
+- ALL_TOOLS: [{ name, description }] for every callable tool, including MCP tools. searchTools(query, { limit? }) ranks them; describeTool(name) returns one's TypeScript declaration.
+- store(key, value) / load(key): keep small JSON values (ids, cursors, summaries) for later codemode calls in this session; storing undefined deletes. Kept only if the script succeeds.
 
 Every call goes through the same permission checks as a direct call. Calls made before a failure are not undone. Optional first line: // @options: {"max_output_tokens": ${DEFAULT_MAX_OUTPUT_TOKENS}, "timeout_ms": 60000}`;
 
@@ -81,12 +84,17 @@ function validateCodemodeInput(
   return { valid: true };
 }
 
-/** The tools a script sees: what the mode offers the model, minus the excluded. */
-function sandboxTools(ctx: ToolContext): SandboxTool[] {
+/** What the mode offers the model, minus the excluded. */
+function callableDefs(ctx: ToolContext): ProviderToolDef[] {
+  return getToolDefs(ctx.agentMode ?? "build").filter(
+    (d) => !NOT_CALLABLE_FROM_CODEMODE.has(d.name),
+  );
+}
+
+/** The tools a script sees. */
+function sandboxTools(ctx: ToolContext, defs: ProviderToolDef[]): SandboxTool[] {
   const callTool = ctx.callTool!;
-  return getToolDefs(ctx.agentMode ?? "build")
-    .filter((d) => !NOT_CALLABLE_FROM_CODEMODE.has(d.name))
-    .map((d) => ({
+  return defs.map((d) => ({
       name: d.name,
       description: d.description,
       inputSchema: d.parameters,
@@ -127,8 +135,10 @@ async function executeCodemode(
     return { success: false, error: `Invalid script: ${message}` };
   }
 
+  const defs = callableDefs(ctx);
   const sandbox = createCodemodeSandbox({
-    tools: sandboxTools(ctx),
+    tools: sandboxTools(ctx, defs),
+    globals: discoveryGlobals(defs),
     // No default deadline: a nested call may sit on a permission prompt. The
     // loop's abort (Esc / stop) still ends the script.
     timeoutMs: parsed.options.timeoutMs ?? Infinity,
@@ -136,7 +146,11 @@ async function executeCodemode(
   });
   const started = Date.now();
   try {
-    const result = await sandbox.execute(parsed.code, { signal: ctx.abort });
+    const stored = ctx.codemodeStore ?? {};
+    const result = await sandbox.execute(parsed.code, {
+      signal: ctx.abort,
+      store: stored,
+    });
     const text = formatCodemodeResult(
       result,
       Date.now() - started,
@@ -148,6 +162,11 @@ async function executeCodemode(
       failedCalls: result.calls.filter((c) => c.status !== "ok").length,
       scriptChars: params.script.length,
       ...(result.ok ? {} : { errorKind: result.error.kind }),
+      // The whole map, only when this script changed it: the loop persists it
+      // on the tool message (session/store.ts `codemodeStore`).
+      ...(result.ok && storeChanged(result.storeWrites)
+        ? { codemodeStore: applyStoreWrites(stored, result.storeWrites) }
+        : {}),
     };
     // A failed script still carries its partial output; the error text is the
     // whole formatted result so the model sees both.
@@ -159,6 +178,19 @@ async function executeCodemode(
   } finally {
     await sandbox.close();
   }
+}
+
+function storeChanged(writes: CodemodeStoreWrites): boolean {
+  return Object.keys(writes.set).length > 0 || writes.delete.length > 0;
+}
+
+export function applyStoreWrites(
+  base: Readonly<Record<string, unknown>>,
+  writes: CodemodeStoreWrites,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...base, ...writes.set };
+  for (const key of writes.delete) delete next[key];
+  return next;
 }
 
 export const CodemodeTool: Tool<CodemodeParams> = buildTool({
