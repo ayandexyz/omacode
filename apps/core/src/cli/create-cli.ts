@@ -28,6 +28,7 @@ import { agentsCommand } from "./commands/agents.js";
 import { evalCommand } from "./commands/eval.js";
 import { uninstallCommand } from "./commands/uninstall.js";
 import { authCommand } from "./commands/auth.js";
+import { codemodeSmokeCommand } from "./commands/codemode-smoke.js";
 
 // ANSI color codes
 const yellowBright = "\x1b[93m";
@@ -104,6 +105,7 @@ export function createCli(extraCommands: CommandModule[] = []) {
     .command(evalCommand as CommandModule)
     .command(authCommand)
     .command(uninstallCommand)
+    .command(codemodeSmokeCommand)
     .strict();
 
   for (const command of extraCommands) {
