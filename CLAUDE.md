@@ -160,7 +160,7 @@ freecode/
 ### Tools
 
 Built-in tools live in `apps/core/src/tools/` and are registered in `tools/index.ts`:
-`read`, `ls`, `write`, `edit`, `glob`, `grep`, `bash`, `bashoutput`, `killbash`, `monitor`, `skill`, `agent` (subagent), `agent_send`, `agent_stop`, `output`, `question`, `webfetch`, `websearch`, `todowrite`, `lsp`, `memory`. MCP tools are registered dynamically at runtime via `registerMcpTool`. Each tool is built through `factory.ts` (`buildTool`) with `parameters`/`behavior`/`permissions`; execution and batching go through `orchestrator.ts` + `batching.ts`. Tools do **not** render — core emits `StreamEvent` data and each frontend draws it (TUI: `apps/tui/src/components/tool-result-message.ts`).
+`read`, `ls`, `write`, `edit`, `glob`, `grep`, `bash`, `bashoutput`, `killbash`, `monitor`, `skill`, `agent` (subagent), `agent_send`, `agent_stop`, `output`, `question`, `webfetch`, `websearch`, `todowrite`, `lsp`, `memory`, `codemode` (off by default — `codemode.enabled` / `FREECODE_CODEMODE=1`; a JS script in a QuickJS sandbox whose `tools.<name>()` calls go back through `AgentLoop.executeTool`, never the orchestrator, so every permission layer applies — spec `2026-10-05-codemode.md`). MCP tools are registered dynamically at runtime via `registerMcpTool`. Each tool is built through `factory.ts` (`buildTool`) with `parameters`/`behavior`/`permissions`; execution and batching go through `orchestrator.ts` + `batching.ts`. Tools do **not** render — core emits `StreamEvent` data and each frontend draws it (TUI: `apps/tui/src/components/tool-result-message.ts`).
 
 #### Adding a tool — registration checklist
 
