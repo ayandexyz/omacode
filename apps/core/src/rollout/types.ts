@@ -84,6 +84,11 @@ export interface FunctionCallEvent extends BaseEvent {
    * still valid, and `trace.ts` falls back to pairing oldest-call-first.
    */
   callId?: string;
+  /**
+   * Set on a call a codemode script made: the codemode call's `callId`
+   * (spec 2026-10-05-codemode.md §4.8). Absent for every call the model made.
+   */
+  parentCallId?: string;
 }
 
 export interface FunctionOutputEvent extends BaseEvent {

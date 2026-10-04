@@ -345,3 +345,16 @@ test("more compactions than expected still passes", () => {
   );
   assert.equal(score.passed, true);
 });
+
+test("expectFirstToolIn looks through a codemode script to its first call", () => {
+  const viaScript = run([tool("codemode"), { ...tool("grep"), parentCallId: "c1" }]);
+  assert.equal(
+    scoreTrajectory(viaScript, kase({ expectFirstToolIn: ["grep"] })).passed,
+    true,
+  );
+  // A case that asks for codemode itself still gets codemode.
+  assert.equal(
+    scoreTrajectory(viaScript, kase({ expectFirstToolIn: ["codemode"] })).passed,
+    true,
+  );
+});

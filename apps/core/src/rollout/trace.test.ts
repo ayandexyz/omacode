@@ -552,3 +552,16 @@ test("a compaction that grew the transcript cannot cancel out a real saving", ()
   assert.equal(trace.compactions, 2);
   assert.equal(trace.compactedTokens, 22_000);
 });
+
+test("marks a codemode script's calls with the codemode call's id", () => {
+  const trace = buildTrace("s1", [
+    event("function.call", 100, { turnId: "turn-0", tool: "codemode", args: {}, callId: "c1" }),
+    event("function.call", 110, { turnId: "turn-0", tool: "grep", args: {}, callId: "c1.1", parentCallId: "c1" }),
+    event("function.output", 150, { turnId: "turn-0", tool: "grep", output: "x", duration_ms: 40, callId: "c1.1" }),
+    event("function.output", 200, { turnId: "turn-0", tool: "codemode", output: "y", duration_ms: 100, callId: "c1" }),
+  ]);
+  assert.deepEqual(
+    trace.toolSpans.map((s) => [s.tool, s.parentCallId]),
+    [["codemode", undefined], ["grep", "c1"]],
+  );
+});

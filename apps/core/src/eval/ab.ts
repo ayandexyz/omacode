@@ -47,6 +47,7 @@ export class AbError extends Error {}
  *   FREECODE_AUTO_POKE                 `loadSignalSettings`, once per AgentLoop
  *   FREECODE_CONFIDENCE_GATE           instance — and the runner builds a
  *   FREECODE_HILLCLIMB_GATE            fresh loop per trial
+ *   FREECODE_CODEMODE                  `loadCodemodeEnabled`, once per AgentLoop
  *
  * A startup-read var (a provider key, a config path, a fetch timeout baked into
  * the client at `createTimeoutFetch`) would be swapped into `process.env` and
@@ -72,6 +73,8 @@ export const VARIABLE_ENV_KEYS = [
   "FREECODE_AUTO_POKE",
   "FREECODE_CONFIDENCE_GATE",
   "FREECODE_HILLCLIMB_GATE",
+  // Read once per AgentLoop (codemode/settings.ts), like the gates above.
+  "FREECODE_CODEMODE",
   // Read per call in compileDynamicContext and loadSystemPrompt.
   "FREECODE_CONTEXT_FRAMING",
   // Read per call in modelPromptOverlay (session/model-prompt.ts).

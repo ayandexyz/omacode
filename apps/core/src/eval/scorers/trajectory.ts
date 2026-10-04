@@ -111,7 +111,13 @@ export function scoreTrajectory(run: RunRecord, kase: EvalCase): TrialScore {
   // Position, not membership. `expectTool` cannot distinguish "greped" from
   // "greped eventually"; this is the distinction the suite exists to score.
   if (kase.expectFirstToolIn !== undefined) {
-    const first = fired[0];
+    // A codemode script is a vehicle, not a move: unless the case asks for
+    // codemode itself, the opening move is the first tool the script called
+    // (its spans follow the codemode call in call order).
+    const first =
+      fired[0] === "codemode" && !kase.expectFirstToolIn.includes("codemode")
+        ? fired[1]
+        : fired[0];
     if (first === undefined || !kase.expectFirstToolIn.includes(first)) {
       return fail(
         `expected first tool in [${kase.expectFirstToolIn.join(",")}], ` +

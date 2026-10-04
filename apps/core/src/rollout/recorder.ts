@@ -213,13 +213,18 @@ export class RolloutRecorder {
     args: Record<string, unknown>,
     turnId: string,
     callId?: string,
+    /** Set for a call a codemode script made: the codemode call's id. */
+    parentCallId?: string,
   ): void {
+    const fields: Record<string, unknown> = {};
+    if (callId) fields.callId = callId;
+    if (parentCallId) fields.parentCallId = parentCallId;
     const event = this.makeEvent("function.call", {
       aggregateID: this.sessionId,
       tool,
       args,
       turnId,
-      ...(callId ? { fields: { callId } } : {}),
+      ...(Object.keys(fields).length > 0 ? { fields } : {}),
     });
     this.write(event);
   }

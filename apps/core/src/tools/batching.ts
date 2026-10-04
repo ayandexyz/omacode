@@ -17,7 +17,7 @@ export interface ToolBatch {
 
 export type IsConcurrencySafeFn = (call: { tool: string; args?: unknown }) => boolean;
 
-const defaultIsSafe: IsConcurrencySafeFn = ({ tool, args }) => {
+export const isConcurrencySafeCall: IsConcurrencySafeFn = ({ tool, args }) => {
   const behavior = getTool(tool)?.behavior;
   if (!behavior) return false;
   return behavior.concurrencySafeFor
@@ -27,7 +27,7 @@ const defaultIsSafe: IsConcurrencySafeFn = ({ tool, args }) => {
 
 export function planToolBatches<T extends { tool: string; args?: unknown }>(
   toolCalls: readonly T[],
-  isSafe: IsConcurrencySafeFn = defaultIsSafe,
+  isSafe: IsConcurrencySafeFn = isConcurrencySafeCall,
 ): ToolBatch[] {
   const batches: ToolBatch[] = [];
   let i = 0;

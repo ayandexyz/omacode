@@ -112,9 +112,14 @@ import {
 } from "./subagent.js";
 import { CheckpointService } from "../checkpoint/index.js";
 import type { ToolOrchestrator } from "../tools/orchestrator.js";
-import { getToolDefs, unattendedToolDefs } from "../tools/defs-cache.js";
+import { getToolDefs, unattendedToolDefs, withCodemode } from "../tools/defs-cache.js";
 import type { UnattendedContext } from "../autonomous/types.js";
-import { planToolBatches } from "../tools/batching.js";
+import { planToolBatches, isConcurrencySafeCall } from "../tools/batching.js";
+import { getOutputStore } from "../tools/output-store/index.js";
+import { NOT_CALLABLE_FROM_CODEMODE } from "../tools/codemode.js";
+import type { NestedToolCaller } from "../tools/types.js";
+import { loadCodemodeEnabled } from "../codemode/settings.js";
+import { capHeadTail, NESTED_OUTPUT_MAX_CHARS } from "../codemode/format.js";
 import { markReadPruned } from "../tools/read-state.js";
 import {
   PruneState,
@@ -511,6 +516,12 @@ export class AgentLoop {
   // alone is a bounce, not a "cannot finish" (see auto-poke.ts).
   private actedSincePoke = false;
   private signalSettings?: SignalSettings;
+  // Codemode (spec 2026-10-05-codemode.md): resolved once per loop, like the
+  // signal settings, so `eval ab` can flip FREECODE_CODEMODE per trial.
+  private codemodeOn?: boolean;
+  // Codemode call ids whose script made a successful destructive call; read
+  // (and cleared) when the batch reports `madeFileChange`.
+  private codemodeMutated = new Set<string>();
   // How many times this run has given the model another turn after it
   // truncated a tool call. Capped: a model that keeps overflowing the output
   // limit must end the run, not retry forever at full prompt cost.
@@ -2197,16 +2208,15 @@ export class AgentLoop {
           toolResults[start + k] = result;
           this.updateLoopHealth(tc, result);
           // Track file mutations so the verification gate only runs when this
-          // run actually changed something.
+          // run actually changed something. A codemode script's own calls are
+          // counted one by one as they run (nestedToolCaller), and it reports
+          // whether any of them mutated.
           if (
-            getTool(tc.tool)?.behavior?.isDestructive === true &&
-            !result.error
+            tc.tool === "codemode"
+              ? this.codemodeMutated.delete(tc.id)
+              : this.noteMutation(tc, result)
           ) {
-            this.filesMutatedThisRun = true;
             madeFileChange = true;
-            const a = tc.args as Record<string, unknown> | undefined;
-            const fp = a && (a.filePath ?? a.path);
-            if (typeof fp === "string") this.mutatedFiles.add(fp);
           }
           const part = assistantMessage.parts.find(
             (p) => p.type === "tool" && p.tool.id === tc.id,
@@ -2373,9 +2383,10 @@ export class AgentLoop {
     const aiProvider = getProvider(provider as any);
     // A definition's allowlist narrows what the mode allows, never widens it.
     const allowed = this.state.role?.tools;
-    const offered = this.unattended
+    const base = this.unattended
       ? unattendedToolDefs(this.state.agentMode)
       : getToolDefs(this.state.agentMode);
+    const offered = this.codemodeEnabled() ? withCodemode(base) : base;
     const tools = allowed
       ? offered.filter((t) => allowed.includes(t.name))
       : offered;
@@ -2964,7 +2975,10 @@ export class AgentLoop {
   // Emits tool.called and tool.completed Bus events
   // Records function.call and function.output to rollout
   // ===========================================================================
-  private async executeTool(toolCall: ToolCall): Promise<ToolResult> {
+  private async executeTool(
+    toolCall: ToolCall,
+    parentCallId?: string,
+  ): Promise<ToolResult> {
     const startTime = Date.now();
 
     // Build hook context
@@ -3161,6 +3175,7 @@ export class AgentLoop {
       toolCall.args as Record<string, unknown>,
       `turn-${this.state.turnCount}`,
       toolCall.id,
+      parentCallId,
     );
 
     const context = {
@@ -3176,6 +3191,12 @@ export class AgentLoop {
       model: this.runModel.model,
       unattended: this.unattended,
       abort: this.abort.signal,
+      // Only a top-level codemode call gets one; nested codemode is refused
+      // before it gets here (NOT_CALLABLE_FROM_CODEMODE).
+      callTool:
+        toolCall.tool === "codemode" && !parentCallId && this.codemodeEnabled()
+          ? this.nestedToolCaller(toolCall)
+          : undefined,
     };
 
     let result: ToolResult;
@@ -3415,6 +3436,76 @@ export class AgentLoop {
       this.signalSettings = loadSignalSettings(this.state.projectPath);
     }
     return this.signalSettings;
+  }
+
+  // ===========================================================================
+  // PRIVATE: codemodeEnabled()
+  // Resolved once per loop. See codemode/settings.ts.
+  // ===========================================================================
+  private codemodeEnabled(): boolean {
+    if (this.codemodeOn === undefined) {
+      this.codemodeOn = loadCodemodeEnabled(this.state.projectPath);
+    }
+    return this.codemodeOn;
+  }
+
+  // ===========================================================================
+  // PRIVATE: noteMutation()
+  // A successful destructive call marks the run as having changed files (the
+  // verification gate keys off it). Returns whether it did.
+  // ===========================================================================
+  private noteMutation(tc: ToolCall, result: ToolResult): boolean {
+    if (getTool(tc.tool)?.behavior?.isDestructive !== true || result.error) {
+      return false;
+    }
+    this.filesMutatedThisRun = true;
+    const a = tc.args as Record<string, unknown> | undefined;
+    const fp = a && (a.filePath ?? a.path);
+    if (typeof fp === "string") this.mutatedFiles.add(fp);
+    return true;
+  }
+
+  // ===========================================================================
+  // PRIVATE: nestedToolCaller()
+  // What a codemode script's `tools.<name>()` runs (spec 2026-10-05-codemode.md
+  // §4.2). Every call goes through executeTool — role, hooks, mode, rules,
+  // permission prompt, unattended envelope — never straight to the
+  // orchestrator. Calls that are not concurrency-safe run one at a time, as in
+  // a normal batch, so a Promise.all over writes cannot race two permission
+  // prompts or two edits of one file. The script gets the FULL output from the
+  // OutputStore (capped at 1 MiB), not the model's truncated view.
+  // ===========================================================================
+  private nestedToolCaller(parent: ToolCall): NestedToolCaller {
+    let n = 0;
+    let serial: Promise<unknown> = Promise.resolve();
+    return async (tool, args) => {
+      if (NOT_CALLABLE_FROM_CODEMODE.has(tool)) {
+        return { output: "", error: `${tool} cannot be called from a codemode script.` };
+      }
+      const call: ToolCall = {
+        id: `${parent.id}.${++n}`,
+        tool,
+        args,
+        execution: "sequential",
+      };
+      const run = () => this.executeTool(call, parent.id);
+      let result: ToolResult;
+      if (isConcurrencySafeCall({ tool, args })) {
+        result = await run();
+      } else {
+        const next = serial.then(run);
+        serial = next.catch(() => undefined);
+        result = await next;
+      }
+      if (this.noteMutation(call, result)) this.codemodeMutated.add(parent.id);
+      if (result.error !== undefined) return { output: "", error: result.error };
+      const full =
+        getOutputStore(this.state.sessionId).get(call.id) ??
+        result.modelOutput ??
+        result.stdout ??
+        "";
+      return { output: capHeadTail(full, NESTED_OUTPUT_MAX_CHARS) };
+    };
   }
 
   // ===========================================================================

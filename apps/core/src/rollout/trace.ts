@@ -90,6 +90,12 @@ export interface ToolSpan {
    * written before that field existed — absent means "unknown", not "ok".
    */
   failed?: boolean;
+  /**
+   * The codemode call that made this one, from `function.call.parentCallId`.
+   * Absent for a call the model made itself. A nested call RAN, so it is a
+   * tool span like any other (spec 2026-10-05-codemode.md §4.8).
+   */
+  parentCallId?: string;
 }
 
 /** A background or retrieval model call made by the memory system. */
@@ -216,6 +222,7 @@ export function buildTrace(
     startedAt: number;
     callSeq: number;
     args?: Record<string, unknown>;
+    parentCallId?: string;
   }
   const pendingById = new Map<string, PendingCall>();
   const pendingByTool = new Map<string, PendingCall[]>();
@@ -275,6 +282,7 @@ export function buildTrace(
           startedAt: event.timestamp,
           callSeq: event.seq,
           args: event.args,
+          ...(event.parentCallId ? { parentCallId: event.parentCallId } : {}),
         };
         if (event.callId) {
           pendingById.set(event.callId, pending);
@@ -300,6 +308,7 @@ export function buildTrace(
           duration_ms: event.duration_ms,
           ...(pending?.args ? { args: pending.args } : {}),
           ...(event.failed === undefined ? {} : { failed: event.failed }),
+          ...(pending?.parentCallId ? { parentCallId: pending.parentCallId } : {}),
         });
         break;
       }
