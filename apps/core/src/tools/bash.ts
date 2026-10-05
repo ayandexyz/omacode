@@ -29,6 +29,8 @@ interface BashParams {
   command: string;
   timeout?: number;
   workdir?: string;
+  /** Alias accepted because the structured result names the resolved path cwd. */
+  cwd?: string;
   run_in_background?: boolean;
 }
 
@@ -81,7 +83,11 @@ const bashSchema: JsonSchema = {
     },
     workdir: {
       type: "string",
-      description: "Working directory for the command",
+      description: "Working directory for the command (preferred spelling)",
+    },
+    cwd: {
+      type: "string",
+      description: "Alias for workdir; if both are set, workdir wins",
     },
     run_in_background: {
       type: "boolean",
@@ -123,6 +129,12 @@ function validateBashInput(
   if (p.timeout !== undefined && typeof p.timeout !== "number") {
     return { valid: false, error: "timeout must be a number" };
   }
+  if (p.workdir !== undefined && typeof p.workdir !== "string") {
+    return { valid: false, error: "workdir must be a string" };
+  }
+  if (p.cwd !== undefined && typeof p.cwd !== "string") {
+    return { valid: false, error: "cwd must be a string" };
+  }
   return { valid: true };
 }
 
@@ -141,10 +153,11 @@ async function executeBash(
 }
 
 function resolveCwd(params: BashParams, ctx: ToolContext): string {
-  if (!params.workdir) return ctx.cwd;
-  return path.isAbsolute(params.workdir)
-    ? params.workdir
-    : path.resolve(ctx.cwd, params.workdir);
+  const requested = params.workdir ?? params.cwd;
+  if (!requested) return ctx.cwd;
+  return path.isAbsolute(requested)
+    ? requested
+    : path.resolve(ctx.cwd, requested);
 }
 
 export async function _executeBash(
