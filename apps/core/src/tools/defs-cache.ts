@@ -16,6 +16,8 @@ export interface ProviderToolDef {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+  /** Result a codemode script receives; never sent as a provider input schema. */
+  result?: Record<string, unknown>;
 }
 
 let cachedAll: ProviderToolDef[] | null = null;
@@ -23,6 +25,16 @@ let cachedAll: ProviderToolDef[] | null = null;
 // only) and rebuilt from cachedAll, so invalidation only needs to clear both.
 const cachedReadOnly = new Map<AgentMode, ProviderToolDef[]>();
 let subscribed = false;
+
+const MCP_CODEMODE_RESULT_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    content: { type: "array", items: { type: "object" } },
+    structuredContent: { type: "object" },
+    isError: { type: "boolean" },
+  },
+  required: ["content"],
+};
 
 function ensureSubscribed(): void {
   if (subscribed) return;
@@ -57,6 +69,10 @@ function buildAll(): ProviderToolDef[] {
           type: "object",
           properties: {},
         }) as unknown as Record<string, unknown>,
+        result: (toolDef?.schemas.result ??
+          (t.id.startsWith("mcp__")
+            ? MCP_CODEMODE_RESULT_SCHEMA
+            : undefined)) as Record<string, unknown> | undefined,
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -108,6 +124,7 @@ function defFor(id: string): ProviderToolDef[] {
       name: id,
       description: tool.description,
       parameters: tool.schemas.parameters as unknown as Record<string, unknown>,
+      result: tool.schemas.result as Record<string, unknown> | undefined,
     },
   ];
 }

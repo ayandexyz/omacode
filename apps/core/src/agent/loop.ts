@@ -112,14 +112,18 @@ import {
 } from "./subagent.js";
 import { CheckpointService } from "../checkpoint/index.js";
 import type { ToolOrchestrator } from "../tools/orchestrator.js";
-import { getToolDefs, unattendedToolDefs, withCodemode } from "../tools/defs-cache.js";
+import {
+  getToolDefs,
+  unattendedToolDefs,
+  withCodemode,
+  type ProviderToolDef,
+} from "../tools/defs-cache.js";
 import type { UnattendedContext } from "../autonomous/types.js";
 import { planToolBatches, isConcurrencySafeCall } from "../tools/batching.js";
 import { getOutputStore } from "../tools/output-store/index.js";
 import { NOT_CALLABLE_FROM_CODEMODE } from "../tools/codemode.js";
 import type { NestedToolCaller } from "../tools/types.js";
 import { loadCodemodeEnabled } from "../codemode/settings.js";
-import { capHeadTail, NESTED_OUTPUT_MAX_CHARS } from "../codemode/format.js";
 import { markReadPruned } from "../tools/read-state.js";
 import {
   PruneState,
@@ -2382,10 +2386,10 @@ export class AgentLoop {
   }> {
     const aiProvider = getProvider(provider as any);
     // A definition's allowlist narrows what the mode allows, never widens it.
-    const allowed = this.state.role?.tools;
     const base = this.unattended
       ? unattendedToolDefs(this.state.agentMode)
       : getToolDefs(this.state.agentMode);
+    const allowed = this.state.role?.tools;
     const offered = this.codemodeEnabled() ? withCodemode(base) : base;
     const tools = allowed
       ? offered.filter((t) => allowed.includes(t.name))
@@ -2978,6 +2982,7 @@ export class AgentLoop {
   private async executeTool(
     toolCall: ToolCall,
     parentCallId?: string,
+    signal: AbortSignal = this.abort.signal,
   ): Promise<ToolResult> {
     const startTime = Date.now();
 
@@ -3190,12 +3195,15 @@ export class AgentLoop {
       provider: this.runModel.provider,
       model: this.runModel.model,
       unattended: this.unattended,
-      abort: this.abort.signal,
+      abort: signal,
       // Only a top-level codemode call gets one; nested codemode is refused
       // before it gets here (NOT_CALLABLE_FROM_CODEMODE).
-      ...(toolCall.tool === "codemode" && !parentCallId && this.codemodeEnabled()
+      ...(toolCall.tool === "codemode" &&
+      !parentCallId &&
+      this.codemodeEnabled()
         ? {
             callTool: this.nestedToolCaller(toolCall),
+            codemodeTools: this.codemodeCallableDefs(),
             codemodeStore: await this.loadCodemodeStore(),
           }
         : {}),
@@ -3451,6 +3459,15 @@ export class AgentLoop {
     return this.codemodeOn;
   }
 
+  /** The exact capability set a script may attempt, before per-call checks. */
+  private codemodeCallableDefs(): ProviderToolDef[] {
+    const base = this.unattended
+      ? unattendedToolDefs(this.state.agentMode)
+      : getToolDefs(this.state.agentMode);
+    const allowed = this.state.role?.tools;
+    return allowed ? base.filter((tool) => allowed.includes(tool.name)) : base;
+  }
+
   // ===========================================================================
   // PRIVATE: loadCodemodeStore()
   // The latest `store()` snapshot on the session's active path (spec §5).
@@ -3498,14 +3515,15 @@ export class AgentLoop {
   // orchestrator. Calls that are not concurrency-safe run one at a time, as in
   // a normal batch, so a Promise.all over writes cannot race two permission
   // prompts or two edits of one file. The script gets the FULL output from the
-  // OutputStore (capped at 1 MiB), not the model's truncated view.
+  // OutputStore, not the model's truncated view. Filtering large output is the
+  // feature's purpose, so the script must see the complete stored value.
   // ===========================================================================
   private nestedToolCaller(parent: ToolCall): NestedToolCaller {
     let n = 0;
     let serial: Promise<unknown> = Promise.resolve();
-    return async (tool, args) => {
+    return async (tool, args, signal) => {
       if (NOT_CALLABLE_FROM_CODEMODE.has(tool)) {
-        return { output: "", error: `${tool} cannot be called from a codemode script.` };
+        return { error: `${tool} cannot be called from a codemode script.` };
       }
       const call: ToolCall = {
         id: `${parent.id}.${++n}`,
@@ -3513,23 +3531,33 @@ export class AgentLoop {
         args,
         execution: "sequential",
       };
-      const run = () => this.executeTool(call, parent.id);
-      let result: ToolResult;
+      // The script's signal, chained to the loop's so Esc still stops it.
+      const callSignal = signal
+        ? AbortSignal.any([this.abort.signal, signal])
+        : this.abort.signal;
+      const run = () => this.executeTool(call, parent.id, callSignal);
+      let result: ToolResult | undefined;
       if (isConcurrencySafeCall({ tool, args })) {
         result = await run();
       } else {
-        const next = serial.then(run);
+        // A write still queued when the script ends never starts.
+        const next = serial.then(() =>
+          callSignal.aborted ? undefined : run(),
+        );
         serial = next.catch(() => undefined);
         result = await next;
       }
+      if (!result) return { error: "cancelled: the script ended" };
       if (this.noteMutation(call, result)) this.codemodeMutated.add(parent.id);
-      if (result.error !== undefined) return { output: "", error: result.error };
+      if (result.error !== undefined) return { error: result.error };
       const full =
         getOutputStore(this.state.sessionId).get(call.id) ??
         result.modelOutput ??
         result.stdout ??
         "";
-      return { output: capHeadTail(full, NESTED_OUTPUT_MAX_CHARS) };
+      return {
+        value: codemodeValue(tool, result, full),
+      };
     };
   }
 
@@ -4189,10 +4217,50 @@ export const createAgentLoopEffect = (
   });
 
 /** The `store()` snapshot a successful codemode result carries, if any. */
-function codemodeStoreOf(
-  result: ToolResult,
-): { codemodeStore?: Record<string, unknown> } {
+function codemodeStoreOf(result: ToolResult): {
+  codemodeStore?: Record<string, unknown>;
+} {
   const meta = result.structuredData as { codemodeStore?: unknown } | undefined;
   const snap = meta?.codemodeStore;
-  return snap && typeof snap === "object" ? { codemodeStore: snap as Record<string, unknown> } : {};
+  return snap && typeof snap === "object"
+    ? { codemodeStore: snap as Record<string, unknown> }
+    : {};
+}
+
+/** Programmatic result shape for scripts; the direct model view stays text. */
+function codemodeValue(
+  tool: string,
+  result: ToolResult,
+  output: string,
+): unknown {
+  const metadata =
+    result.structuredData && typeof result.structuredData === "object"
+      ? (result.structuredData as Record<string, unknown>)
+      : {};
+  if (Object.prototype.hasOwnProperty.call(metadata, "codemodeValue")) {
+    return metadata.codemodeValue;
+  }
+  if (tool === "bash") {
+    return {
+      output,
+      exit_code: metadata.exitCode ?? null,
+      ...(metadata.background === true ? { background: true } : {}),
+      ...(typeof metadata.shellId === "string"
+        ? { shell_id: metadata.shellId }
+        : {}),
+      ...(typeof metadata.command === "string"
+        ? { command: metadata.command }
+        : {}),
+      ...(typeof metadata.cwd === "string" ? { cwd: metadata.cwd } : {}),
+    };
+  }
+  if (tool === "glob") {
+    return metadata.count === 0
+      ? []
+      : output
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean);
+  }
+  return output;
 }

@@ -36,7 +36,14 @@ export function searchToolDefs(
   limit = DEFAULT_SEARCH_LIMIT,
 ): ToolHit[] {
   const index = new Bm25Index(
-    defs.map((d) => ({ name: d.name, description: d.description, content: "" }) as MemoryEntry),
+    defs.map(
+      (d) =>
+        ({
+          name: d.name,
+          description: d.description,
+          content: "",
+        }) as MemoryEntry,
+    ),
     (e) => e.name,
   );
   const byName = new Map(defs.map((d) => [d.name, d]));
@@ -46,7 +53,11 @@ export function searchToolDefs(
   const hits =
     ranked.length > 0
       ? ranked
-      : defs.filter((d) => d.name.toLowerCase().includes(query.toLowerCase().trim())).slice(0, limit);
+      : defs
+          .filter((d) =>
+            d.name.toLowerCase().includes(query.toLowerCase().trim()),
+          )
+          .slice(0, limit);
   return hits.map((d) => ({
     name: toCodemodeIdentifier(d.name),
     description: firstLine(d.description),
@@ -58,25 +69,34 @@ export function describeToolDef(
   defs: readonly ProviderToolDef[],
   name: string,
 ): string | undefined {
-  const def = defs.find((d) => d.name === name || toCodemodeIdentifier(d.name) === name);
+  const def = defs.find(
+    (d) => d.name === name || toCodemodeIdentifier(d.name) === name,
+  );
   if (!def) return undefined;
   return renderToolSample({
     name: def.name,
     description: def.description,
     inputSchema: def.parameters,
+    outputSchema: def.result ?? { type: "string" },
   });
 }
 
 /** The sandbox globals, over the same tool list the script's `tools` has. */
-export function discoveryGlobals(defs: readonly ProviderToolDef[]): SandboxTool[] {
+export function discoveryGlobals(
+  defs: readonly ProviderToolDef[],
+): SandboxTool[] {
   return [
     {
       name: "searchTools",
       description: "Rank callable tools by relevance to a query.",
       spread: true,
-      signature: "(query: string, options?: { limit?: number }): Promise<Array<{ name: string; description: string }>>",
+      signature:
+        "(query: string, options?: { limit?: number }): Promise<Array<{ name: string; description: string }>>",
       execute: (args) => {
-        const [query, options] = args as [unknown, { limit?: unknown } | undefined];
+        const [query, options] = args as [
+          unknown,
+          { limit?: unknown } | undefined,
+        ];
         const limit =
           typeof options?.limit === "number" && options.limit > 0
             ? Math.floor(options.limit)
@@ -86,10 +106,12 @@ export function discoveryGlobals(defs: readonly ProviderToolDef[]): SandboxTool[
     },
     {
       name: "describeTool",
-      description: "A tool's description and TypeScript declaration, or undefined.",
+      description:
+        "A tool's description and TypeScript declaration, or undefined.",
       spread: true,
       signature: "(name: string): Promise<string | undefined>",
-      execute: (args) => describeToolDef(defs, String((args as unknown[])[0] ?? "")),
+      execute: (args) =>
+        describeToolDef(defs, String((args as unknown[])[0] ?? "")),
     },
   ];
 }

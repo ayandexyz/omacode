@@ -22,10 +22,7 @@ import { getShellRegistry, shellSessionOf } from "./shells/index.js";
 import type { ShellRegistry, ShellStartOptions } from "./shells/registry.js";
 import type { ShellSummary } from "./shells/types.js";
 import { BusEvents } from "../bus/index.js";
-import {
-  notifyTask,
-  taskNotificationsEnabled,
-} from "../agent/task-notify.js";
+import { notifyTask, taskNotificationsEnabled } from "../agent/task-notify.js";
 import { recordEnd, recordStart } from "../agent/background-ledger.js";
 
 interface BashParams {
@@ -93,6 +90,20 @@ const bashSchema: JsonSchema = {
     },
   },
   required: ["command"],
+};
+
+/** Programmatic result exposed to codemode scripts. */
+const bashResultSchema: JsonSchema = {
+  type: "object",
+  properties: {
+    output: { type: "string" },
+    exit_code: { type: "number" },
+    background: { type: "boolean" },
+    shell_id: { type: "string" },
+    command: { type: "string" },
+    cwd: { type: "string" },
+  },
+  required: ["output"],
 };
 
 // =============================================================================
@@ -311,12 +322,14 @@ function startBackground(
 }
 
 /** The <result> of a shell's completion notification. */
-function shellResult(id: string, exitCode: number | null, tail: string): string {
+function shellResult(
+  id: string,
+  exitCode: number | null,
+  tail: string,
+): string {
   return [
     `Exit code: ${exitCode ?? "none (killed by a signal)"}`,
-    tail.trim()
-      ? `Last output:\n${tail.trimEnd()}`
-      : "(no output)",
+    tail.trim() ? `Last output:\n${tail.trimEnd()}` : "(no output)",
     `bashoutput(bash_id: "${id}") returns everything you have not read yet.`,
   ].join("\n");
 }
@@ -431,11 +444,16 @@ function runForeground(
     // tool promise would then never settle and the UI spins forever. Settle
     // shortly after `exit` with whatever was captured; in the normal case
     // `close` wins the race and this timer is cleared.
-    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+    const onExit = (
+      code: number | null,
+      signal: NodeJS.Signals | null,
+    ): void => {
       exitGrace = setTimeout(() => finish(code, signal), 250);
     };
-    const onClose = (code: number | null, signal: NodeJS.Signals | null): void =>
-      finish(code, signal);
+    const onClose = (
+      code: number | null,
+      signal: NodeJS.Signals | null,
+    ): void => finish(code, signal);
     child.on("exit", onExit);
     child.on("close", onClose);
 
@@ -447,11 +465,16 @@ function runForeground(
      */
     function moveToBackground(): boolean {
       const initial =
-        stdout + (stderr ? `${stdout ? "\n" : ""}<stderr>\n${stderr}\n</stderr>\n` : "");
+        stdout +
+        (stderr ? `${stdout ? "\n" : ""}<stderr>\n${stderr}\n</stderr>\n` : "");
       let tracked;
       try {
-        tracked = trackShell(params, ctx, cwd, ctx.sessionId!, (registry, options) =>
-          registry.adopt(options, spawned, initial),
+        tracked = trackShell(
+          params,
+          ctx,
+          cwd,
+          ctx.sessionId!,
+          (registry, options) => registry.adopt(options, spawned, initial),
         );
       } catch {
         return false;
@@ -472,7 +495,9 @@ function runForeground(
         result: {
           title: params.command.split("\n")[0].slice(0, 50),
           output: [
-            initial.trim() ? `Output so far:\n${tailChars(initial, MOVED_OUTPUT_CHARS)}\n` : "",
+            initial.trim()
+              ? `Output so far:\n${tailChars(initial, MOVED_OUTPUT_CHARS)}\n`
+              : "",
             "<bash_metadata>",
             `Still running after ${secs}s, so it was moved to the background as ${shell.id} instead of being killed. Do not run it again.`,
             ...backgroundGuidance(shell.id, notify),
@@ -573,6 +598,7 @@ export const BashTool: Tool<BashParams> = buildTool({
   description: BASH_DESCRIPTION,
   schemas: {
     parameters: bashSchema,
+    result: bashResultSchema,
   },
   permissions: {
     operations: ["shell"],

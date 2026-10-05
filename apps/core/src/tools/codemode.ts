@@ -64,7 +64,7 @@ const DESCRIPTION = `Run a JavaScript script that calls your other tools, and ge
 
 The script is the body of an async function: top-level await and return work. It runs in a sandbox with no Node APIs, file system, network or timers; it reaches the outside world only through tools.
 
-- tools.<name>(args): call any tool you can call directly, with the same arguments. Names with characters invalid in identifiers use _ (mcp__my-server__x is tools.mcp__my_server__x). Every call resolves to a STRING — the same text the tool gives you directly, but not truncated (glob/grep/ls return one path or match per line: split("\\n")). It rejects with an Error carrying the tool's error or denial. Use Promise.allSettled to keep partial results. Not callable: ${[...NOT_CALLABLE_FROM_CODEMODE].filter((t) => t !== "finish_iteration").join(", ")}.
+- tools.<name>(args): call a documented callable tool with the same arguments. Names with characters invalid in identifiers use _ (mcp__my-server__x is tools.mcp__my_server__x). Most calls resolve to the full output string; declarations name structured exceptions (bash returns output and exit_code, glob returns string[], MCP returns CallToolResult). Calls reject with an Error on execution failure or denial. Use Promise.allSettled to keep partial results. Not callable: ${[...NOT_CALLABLE_FROM_CODEMODE].filter((t) => t !== "finish_iteration").join(", ")}.
 - text(value), console.log(...): add to the output. return value adds it too. exit() ends the script. Do not redeclare tools, text, store, load or ALL_TOOLS.
 - ALL_TOOLS: [{ name, description }] for every callable tool, including MCP tools. searchTools(query, { limit? }) ranks them; describeTool(name) returns one's TypeScript declaration.
 - store(key, value) / load(key): keep small JSON values (ids, cursors, summaries) for later codemode calls in this session; storing undefined deletes. Kept only if the script succeeds.
@@ -79,34 +79,46 @@ function validateCodemodeInput(
   }
   const p = params as Record<string, unknown>;
   if (typeof p.script !== "string" || p.script.trim().length === 0) {
-    return { valid: false, error: "script is required and must be a non-empty string" };
+    return {
+      valid: false,
+      error: "script is required and must be a non-empty string",
+    };
   }
   return { valid: true };
 }
 
 /** What the mode offers the model, minus the excluded. */
 function callableDefs(ctx: ToolContext): ProviderToolDef[] {
-  return getToolDefs(ctx.agentMode ?? "build").filter(
-    (d) => !NOT_CALLABLE_FROM_CODEMODE.has(d.name),
-  );
+  return [
+    ...(ctx.codemodeTools ?? getToolDefs(ctx.agentMode ?? "build")),
+  ].filter((d) => !NOT_CALLABLE_FROM_CODEMODE.has(d.name));
 }
 
 /** The tools a script sees. */
-function sandboxTools(ctx: ToolContext, defs: ProviderToolDef[]): SandboxTool[] {
+function sandboxTools(
+  ctx: ToolContext,
+  defs: ProviderToolDef[],
+): SandboxTool[] {
   const callTool = ctx.callTool!;
   return defs.map((d) => ({
-      name: d.name,
-      description: d.description,
-      inputSchema: d.parameters,
-      execute: async (args: unknown) => {
-        const result = await callTool(
-          d.name,
-          args && typeof args === "object" ? (args as Record<string, unknown>) : {},
-        );
-        if (result.error !== undefined) throw new Error(result.error);
-        return result.output;
-      },
-    }));
+    name: d.name,
+    description: d.description,
+    inputSchema: d.parameters,
+    outputSchema: d.result ?? { type: "string" },
+    // pi aborts `signal` when the script ends (unawaited calls included),
+    // times out, or is aborted: a nested call still running is cancelled.
+    execute: async (args: unknown, { signal }) => {
+      const result = await callTool(
+        d.name,
+        args && typeof args === "object"
+          ? (args as Record<string, unknown>)
+          : {},
+        signal,
+      );
+      if (result.error !== undefined) throw new Error(result.error);
+      return result.value;
+    },
+  }));
 }
 
 async function executeCodemode(
@@ -131,7 +143,8 @@ async function executeCodemode(
   try {
     parsed = parseCodemodeSource(params.script);
   } catch (err) {
-    const message = err instanceof CodemodeSourceError ? err.message : String(err);
+    const message =
+      err instanceof CodemodeSourceError ? err.message : String(err);
     return { success: false, error: `Invalid script: ${message}` };
   }
 

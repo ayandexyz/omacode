@@ -1,12 +1,25 @@
-/** A nested call's result as a script sees it: the full output, or the error. */
+/** A nested call's result as a script sees it: a JSON value, or the error. */
 export interface NestedToolResult {
-  output: string;
+  value?: unknown;
   error?: string;
 }
 
+export interface CodemodeCallableTool {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  result?: Record<string, unknown>;
+}
+
+/**
+ * `signal` is the script's own: aborted when the script ends, so a call still
+ * running (or still queued behind a write) is cancelled instead of finishing
+ * with nobody to read its result.
+ */
 export type NestedToolCaller = (
   tool: string,
   args: Record<string, unknown>,
+  signal?: AbortSignal,
 ) => Promise<NestedToolResult>;
 
 export interface ToolContext {
@@ -44,6 +57,8 @@ export interface ToolContext {
    * 2026-10-05-codemode.md §4.2).
    */
   callTool?: NestedToolCaller;
+  /** Exact role- and mode-filtered tools callable by this script. */
+  codemodeTools?: readonly CodemodeCallableTool[];
   /**
    * Values earlier codemode scripts kept with `store()`, as of the session's
    * active path. Set by the loop alongside `callTool` (spec §5).

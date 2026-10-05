@@ -30,10 +30,18 @@ const globSchema: JsonSchema = {
       type: "string",
       description: "Glob pattern to match (e.g. '**/*.ts', 'src/**/*.js')",
     },
-    path: { type: "string", description: "Directory to search in (defaults to cwd)" },
+    path: {
+      type: "string",
+      description: "Directory to search in (defaults to cwd)",
+    },
     cwd: { type: "string", description: "Current working directory" },
   },
   required: ["pattern"],
+};
+
+const globResultSchema: JsonSchema = {
+  type: "array",
+  items: { type: "string" },
 };
 
 // =============================================================================
@@ -152,6 +160,7 @@ export const GlobTool: Tool<GlobParams> = buildTool({
 - Batch it — several globs and greps in one message cost far less than one per turn.`,
   schemas: {
     parameters: globSchema,
+    result: globResultSchema,
   },
   permissions: {
     operations: ["file.read"],

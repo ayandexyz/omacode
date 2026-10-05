@@ -6,8 +6,6 @@
 import type { CodemodeResult } from "@earendil-works/pi-codemode";
 
 export const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
-/** What a nested call hands the script: generous, since filtering is the point. */
-export const NESTED_OUTPUT_MAX_CHARS = 1024 * 1024;
 
 /** Keep the head and tail of `text` within `maxChars`, marking the gap. */
 export function capHeadTail(text: string, maxChars: number): string {
@@ -41,9 +39,12 @@ export function formatCodemodeResult(
     if (item.type === "text") parts.push(item.text);
     else images++;
   }
-  if (result.ok && result.value !== undefined) parts.push(stringify(result.value));
+  if (result.ok && result.value !== undefined)
+    parts.push(stringify(result.value));
   if (images > 0) {
-    parts.push(`[${images} image(s) omitted: codemode does not return images yet]`);
+    parts.push(
+      `[${images} image(s) omitted: codemode does not return images yet]`,
+    );
   }
 
   const seconds = (wallMs / 1000).toFixed(1);

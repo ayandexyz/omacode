@@ -15,7 +15,8 @@ interface McpToolDef {
 }
 
 interface CallToolResult {
-  content: Array<{ type: string; text?: string }>;
+  content: Array<{ type: string; text?: string; [key: string]: unknown }>;
+  structuredContent?: Record<string, unknown>;
   isError?: boolean;
 }
 
@@ -70,7 +71,16 @@ export function convertMcpTool(mcpTool: McpToolDef, serverName: string): Tool {
         const output = result.content
           .map((c) => (c.type === "text" ? c.text : JSON.stringify(c)))
           .join("\n");
-        return { success: true, result: { title: prefixedName, output } };
+        return {
+          success: true,
+          result: {
+            title: prefixedName,
+            output,
+            // Direct calls remain text. Codemode unwraps this private value so
+            // scripts retain structuredContent, isError, images and resources.
+            metadata: { codemodeValue: result },
+          },
+        };
       } catch (err) {
         return { success: false, error: String(err) };
       }

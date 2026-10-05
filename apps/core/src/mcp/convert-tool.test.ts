@@ -8,7 +8,11 @@ const ctx = {} as ToolContext;
 
 test("convertMcpTool uses mcp__server__tool id for rule matching", () => {
   const tool = convertMcpTool(
-    { name: "save", description: "Save context", inputSchema: { type: "object" } },
+    {
+      name: "save",
+      description: "Save context",
+      inputSchema: { type: "object" },
+    },
     "contextcarry",
   );
   assert.equal(tool.id, "mcp__contextcarry__save");
@@ -16,7 +20,11 @@ test("convertMcpTool uses mcp__server__tool id for rule matching", () => {
 
 test("convertMcpTool uses server/tool as userFacingName", () => {
   const tool = convertMcpTool(
-    { name: "load", description: "Load context", inputSchema: { type: "object" } },
+    {
+      name: "load",
+      description: "Load context",
+      inputSchema: { type: "object" },
+    },
     "contextcarry",
   );
   assert.equal(tool.behavior.userFacingName, "contextcarry/load");
@@ -91,7 +99,10 @@ test("execute forwards the registered per-server timeout to callTool", async () 
   };
   registerClient("srv", fakeClient as never, 12345);
   try {
-    const tool = convertMcpTool({ name: "do", inputSchema: { type: "object" } }, "srv");
+    const tool = convertMcpTool(
+      { name: "do", inputSchema: { type: "object" } },
+      "srv",
+    );
     const res = await tool.execute({ x: 1 }, ctx);
     assert.equal(res.success, true);
     assert.equal(res.result?.output, "done");
@@ -114,9 +125,40 @@ test("execute joins multiple text content blocks", async () => {
   };
   registerClient("srv", fakeClient as never, 30000);
   try {
-    const tool = convertMcpTool({ name: "do", inputSchema: { type: "object" } }, "srv");
+    const tool = convertMcpTool(
+      { name: "do", inputSchema: { type: "object" } },
+      "srv",
+    );
     const res = await tool.execute({}, ctx);
     assert.equal(res.result?.output, "line1\nline2");
+  } finally {
+    removeClient("srv");
+  }
+});
+
+test("execute preserves the complete MCP result for codemode", async () => {
+  const original = {
+    content: [
+      { type: "text", text: "summary" },
+      { type: "image", data: "abc", mimeType: "image/png" },
+    ],
+    structuredContent: { count: 3 },
+    isError: false,
+  };
+  const fakeClient = {
+    callTool: async () => original,
+    close: async () => {},
+  };
+  registerClient("srv", fakeClient as never, 30000);
+  try {
+    const tool = convertMcpTool(
+      { name: "do", inputSchema: { type: "object" } },
+      "srv",
+    );
+    const res = await tool.execute({}, ctx);
+    assert.equal(res.success, true);
+    if (!res.success) return;
+    assert.deepEqual(res.result.metadata?.codemodeValue, original);
   } finally {
     removeClient("srv");
   }
