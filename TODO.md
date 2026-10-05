@@ -12,6 +12,14 @@ be "fixed" → `docs/DECISIONS.md`.
 
 ## Small known limitations
 
+### `bash` ignores `ToolContext.abort` (found 2026-10-05)
+
+`tools/bash.ts` never reads `ctx.abort` (only `webfetch`/`websearch` do), so
+an aborted foreground `bash` runs until it exits or hits its timeout. Found
+while making codemode cancel a script's unfinished nested calls (codemode spec
+§4.11): queued calls are cancelled, a running `bash` is not. Fix: kill the
+process group on `abort`, as `killbash` does.
+
 ### `freecode eval` does not exit after printing its results (found 2026-09-24)
 
 **Status:** confirmed, wastes wall-clock only, not money. Pre-dates the
