@@ -33,6 +33,7 @@ import type {
   ProviderChunk,
 } from "../providers/types.js";
 import type { SessionStore } from "../session/store.js";
+import type { AgentRole } from "./definitions/types.js";
 
 type SessionStoreLike = Pick<SessionStore, "getMessages" | "navigate">;
 
@@ -49,8 +50,13 @@ let script = "";
 /** Run number, so each run's codemode call gets its own id (cm-1, cm-2, …). */
 let runNo = 0;
 let sentThisRun = false;
+/** Optional hallucinated top-level call used to pin only-mode enforcement. */
+let topLevelCall: { name: string; args: Record<string, unknown> } | undefined;
 /** Tool names offered on each request. */
 const offered: string[][] = [];
+/** Tool descriptions and system prompt text of the first request. */
+let firstDescriptions: Record<string, string> = {};
+let firstSystem = "";
 /** The codemode tool result the model got back, per run. */
 const codemodeResults: string[] = [];
 let codemodeResult = "";
@@ -66,15 +72,51 @@ registerProvider("codemode-fake" as ProviderId, {
       model: "fake-model",
       usage: { inputTokens: 1, outputTokens: 1 },
     }),
-    stream: async function* (opts: ExecuteOptions): AsyncGenerator<ProviderChunk> {
-      offered.push((opts.tools ?? []).map((t) => (t as { name?: string; id?: string }).name ?? (t as { id: string }).id));
+    stream: async function* (
+      opts: ExecuteOptions,
+    ): AsyncGenerator<ProviderChunk> {
+      offered.push(
+        (opts.tools ?? []).map(
+          (t) =>
+            (t as { name?: string; id?: string }).name ??
+            (t as { id: string }).id,
+        ),
+      );
+      if (offered.length === 1) {
+        firstDescriptions = Object.fromEntries(
+          (opts.tools ?? []).map((t) => {
+            const d = t as { name: string; description: string };
+            return [d.name, d.description];
+          }),
+        );
+        firstSystem =
+          typeof opts.system === "string"
+            ? opts.system
+            : (opts.system ?? []).map((b) => b.text).join("\n");
+      }
       if (!sentThisRun) {
         sentThisRun = true;
-        yield { type: "tool_call", id: `cm-${runNo}`, name: "codemode", args: { script } };
+        if (topLevelCall) {
+          yield {
+            type: "tool_call",
+            id: `direct-${runNo}`,
+            name: topLevelCall.name,
+            args: topLevelCall.args,
+          };
+          yield { type: "usage", usage: { inputTokens: 10, outputTokens: 2 } };
+          return;
+        }
+        yield {
+          type: "tool_call",
+          id: `cm-${runNo}`,
+          name: "codemode",
+          args: { script },
+        };
       } else {
         for (const m of opts.messages ?? []) {
           for (const p of m.parts) {
-            if (p.type === "tool" && p.tool.id === `cm-${runNo}`) codemodeResult = String(p.result ?? "");
+            if (p.type === "tool" && p.tool.id === `cm-${runNo}`)
+              codemodeResult = String(p.result ?? "");
           }
         }
         codemodeResults[runNo - 1] = codemodeResult;
@@ -97,15 +139,26 @@ function readEvents(dir: string): Array<Record<string, unknown>> {
 async function runLoop(opts: {
   sessionId: string;
   enabled: boolean;
+  mode?: "on" | "only";
   agentMode: "build" | "explore";
+  role?: AgentRole;
   /** `__PROJECT__` is replaced with the project's absolute path. */
   script: string;
   /** Further runs in the same session, each one codemode call. */
   moreScripts?: string[];
   /** Called before run i (0-based) of moreScripts, e.g. to navigate the tree. */
-  beforeMore?: (i: number, store: SessionStoreLike, sessionId: string, projectPath: string) => Promise<void>;
+  beforeMore?: (
+    i: number,
+    store: SessionStoreLike,
+    sessionId: string,
+    projectPath: string,
+  ) => Promise<void>;
   permissions?: Record<string, unknown>;
   files?: Record<string, string>;
+  /** Wait this long after the last run, for calls that would outlive it. */
+  settleMs?: number;
+  /** Make the fake provider call this directly instead of codemode. */
+  topLevelCall?: { name: string; args: Record<string, unknown> };
 }) {
   offered.length = 0;
   codemodeResults.length = 0;
@@ -113,11 +166,27 @@ async function runLoop(opts: {
   runNo = 0;
   const rolloutDir = mkdtempSync(join(tmpdir(), "freecode-codemode-rollout-"));
   const projectPath = mkdtempSync(join(tmpdir(), "freecode-codemode-project-"));
+  topLevelCall = opts.topLevelCall
+    ? {
+        ...opts.topLevelCall,
+        args: Object.fromEntries(
+          Object.entries(opts.topLevelCall.args).map(([key, value]) => [
+            key,
+            typeof value === "string"
+              ? value.replaceAll("__PROJECT__", projectPath)
+              : value,
+          ]),
+        ),
+      }
+    : undefined;
   mkdirSync(join(projectPath, ".freecode"), { recursive: true });
   writeFileSync(
     join(projectPath, ".freecode", "settings.json"),
     JSON.stringify({
-      codemode: { enabled: opts.enabled },
+      codemode: {
+        enabled: opts.enabled,
+        ...(opts.mode ? { mode: opts.mode } : {}),
+      },
       ...(opts.permissions ? { permissions: opts.permissions } : {}),
     }),
     "utf-8",
@@ -159,7 +228,8 @@ async function runLoop(opts: {
   delete process.env.FREECODE_CODEMODE;
   try {
     for (let i = 0; i < scripts.length; i++) {
-      if (i > 0) await opts.beforeMore?.(i - 1, store, opts.sessionId, projectPath);
+      if (i > 0)
+        await opts.beforeMore?.(i - 1, store, opts.sessionId, projectPath);
       script = scripts[i];
       runNo = i + 1;
       sentThisRun = false;
@@ -169,8 +239,10 @@ async function runLoop(opts: {
         sessionId: opts.sessionId,
         provider: "codemode-fake",
         projectPath,
+        role: opts.role,
       });
     }
+    if (opts.settleMs) await new Promise((r) => setTimeout(r, opts.settleMs));
   } finally {
     if (prevEnv !== undefined) process.env.FREECODE_CODEMODE = prevEnv;
     await runtime.dispose();
@@ -192,9 +264,14 @@ test("a script cannot reach a tool its mode does not offer", async () => {
       catch (e) { text("REFUSED: " + e.message); }`,
   });
   assert.equal(written, false);
-  assert.ok(offered[0].includes("codemode"), "offered in explore: it can only read there");
+  assert.ok(
+    offered[0].includes("codemode"),
+    "offered in explore: it can only read there",
+  );
   assert.ok(!offered[0].includes("write"));
-  assert.ok(!events.some((e) => e.type === "function.call" && e.tool === "write"));
+  assert.ok(
+    !events.some((e) => e.type === "function.call" && e.tool === "write"),
+  );
   assert.match(codemodeResult, /REFUSED: tools\.write does not exist/);
   assert.doesNotMatch(codemodeResult, /WROTE/);
 });
@@ -212,16 +289,26 @@ test("a script's call is permission-checked by the loop like a direct one", asyn
       try { text(await tools.read({ filePath: "__PROJECT__/secret.txt" })); }
       catch (e) { text("DENIED: " + e.message); }`,
   });
-  const denied = events.filter((e) => e.type === "function.denied" && e.tool === "read");
+  const denied = events.filter(
+    (e) => e.type === "function.denied" && e.tool === "read",
+  );
   assert.equal(denied.length, 1);
   assert.equal(denied[0].source, "rule");
-  assert.ok(!events.some((e) => e.type === "function.call" && e.tool === "read"));
-  assert.match(codemodeResult, /DENIED: Permission denied by rule: Read\(\.\/secret\.txt\)/);
+  assert.ok(
+    !events.some((e) => e.type === "function.call" && e.tool === "read"),
+  );
+  assert.match(
+    codemodeResult,
+    /DENIED: Permission denied by rule: Read\(\.\/secret\.txt\)/,
+  );
   assert.doesNotMatch(codemodeResult, /TOP-SECRET/);
 });
 
 test("a script's calls run, are traced under the codemode call, and see full output", async () => {
-  const big = Array.from({ length: 3000 }, (_, i) => `line ${i} needle${i % 1000 === 0 ? "-hit" : ""}`).join("\n");
+  const big = Array.from(
+    { length: 3000 },
+    (_, i) => `line ${i} needle${i % 1000 === 0 ? "-hit" : ""}`,
+  ).join("\n");
   const { events } = await runLoop({
     sessionId: "codemode-build",
     enabled: true,
@@ -234,7 +321,9 @@ test("a script's calls run, are traced under the codemode call, and see full out
       ]);
       return { full: a.length > 30000 && a.includes("line 1500 ") && !a.includes("[truncated"), grepHits: b.split("\\n").filter((l) => l.includes("-hit")).length };`,
   });
-  const nested = events.filter((e) => e.type === "function.call" && e.parentCallId === "cm-1");
+  const nested = events.filter(
+    (e) => e.type === "function.call" && e.parentCallId === "cm-1",
+  );
   assert.deepEqual(nested.map((e) => e.tool).sort(), ["grep", "read"]);
   assert.match(codemodeResult, /^Script completed in [\d.]+s \(2 tool calls\)/);
   // Over the model's 30 KB head+tail cap, so only the OutputStore copy has
@@ -253,6 +342,8 @@ test("disabled: not offered, and a hallucinated call is refused", async () => {
   assert.ok(!offered[0].includes("codemode"));
   assert.ok(!events.some((e) => e.type === "function.call" && e.parentCallId));
   assert.match(codemodeResult, /codemode is not enabled/);
+  assert.doesNotMatch(firstDescriptions.read, /Codemode:/);
+  assert.doesNotMatch(firstSystem, /Use codemode to batch/);
 });
 
 test("store() persists across turns, and a /tree branch sees only its own path", async () => {
@@ -272,7 +363,9 @@ test("store() persists across turns, and a /tree branch sees only its own path",
       if (i === 0) {
         // Remember the codemode message of run 1 to branch back to later.
         const msgs = await store.getMessages(sessionId, projectPath);
-        afterFirst = msgs.findLast((m) => m.parts.some((p) => p.codemodeStore))!.id;
+        afterFirst = msgs.findLast((m) =>
+          m.parts.some((p) => p.codemodeStore),
+        )!.id;
       }
       if (i === 1) await store.navigate(sessionId, afterFirst, projectPath);
     },
@@ -284,4 +377,144 @@ test("store() persists across turns, and a /tree branch sees only its own path",
   // A failed script keeps no writes (it wrote none here, but must not crash).
   assert.match(codemodeResults[3], /^Script failed/);
   assert.match(codemodeResults[4], /\n1$/);
+});
+
+test("a write still queued when the script ends never runs", async () => {
+  // bash is not concurrency-safe, so the write queues behind it; the script
+  // returns without awaiting either, which aborts the write before it starts.
+  const { events, written } = await runLoop({
+    sessionId: "codemode-cancel",
+    enabled: true,
+    agentMode: "build",
+    settleMs: 1500,
+    permissions: { allow: ["Bash", "Write"] },
+    script: `
+      tools.bash({ command: "sleep 1" });
+      tools.write({ filePath: "__PROJECT__/evil.txt", content: "x" });
+      return "returned";`,
+  });
+  assert.ok(
+    events.some((e) => e.type === "function.call" && e.tool === "bash"),
+    "bash ran",
+  );
+  assert.equal(written, false);
+  assert.ok(
+    !events.some((e) => e.type === "function.call" && e.tool === "write"),
+  );
+  assert.match(codemodeResult, /returned/);
+});
+
+test('enabled: tools and system prompt point at codemode, as pi\'s mode "on" does', async () => {
+  await runLoop({
+    sessionId: "codemode-presentation",
+    enabled: true,
+    agentMode: "build",
+    script: `return 1`,
+  });
+  assert.match(
+    firstDescriptions.read,
+    /Codemode: `tools\.read\(args\)` resolves to a string\.$/,
+  );
+  assert.match(firstDescriptions.bash, /Codemode: `tools\.bash\(args\)`/);
+  // Not callable from a script, so no hint.
+  assert.doesNotMatch(firstDescriptions.agent ?? "", /Codemode:/);
+  assert.doesNotMatch(firstDescriptions.codemode, /Codemode: `tools\.codemode/);
+  assert.match(firstSystem, /Use codemode to batch independent tool calls/);
+});
+
+test("only mode hides direct declarations but scripts retain their structured tools", async () => {
+  await runLoop({
+    sessionId: "codemode-only",
+    enabled: true,
+    mode: "only",
+    agentMode: "build",
+    script: `
+      const files = await tools.glob({ pattern: "*.txt", path: "__PROJECT__" });
+      return { array: Array.isArray(files), files };`,
+    files: { "one.txt": "1", "two.txt": "2" },
+  });
+  assert.deepEqual(offered[0], ["codemode"]);
+  assert.match(
+    firstDescriptions.codemode,
+    /Callable tools in codemode-only mode/,
+  );
+  assert.match(firstDescriptions.codemode, /glob\(args:/);
+  assert.match(firstSystem, /Direct tool declarations are hidden/);
+  assert.match(codemodeResult, /"array": true/);
+  assert.match(codemodeResult, /one\.txt/);
+});
+
+test("only mode refuses an undeclared top-level direct call", async () => {
+  const { events, written } = await runLoop({
+    sessionId: "codemode-only-direct-deny",
+    enabled: true,
+    mode: "only",
+    agentMode: "build",
+    script: `return "unused"`,
+    topLevelCall: {
+      name: "write",
+      args: { filePath: "__PROJECT__/evil.txt", content: "bypass" },
+    },
+  });
+  assert.equal(written, false);
+  assert.ok(
+    events.some(
+      (event) =>
+        event.type === "function.denied" &&
+        event.tool === "write" &&
+        event.source === "mode",
+    ),
+  );
+  assert.ok(
+    !events.some(
+      (event) => event.type === "function.call" && event.tool === "write",
+    ),
+  );
+});
+
+test("a role's allowlist also bounds the script catalog", async () => {
+  await runLoop({
+    sessionId: "codemode-role",
+    enabled: true,
+    agentMode: "build",
+    role: { name: "reader", prompt: "Read only.", tools: ["codemode", "read"] },
+    script: `return ALL_TOOLS.map((tool) => tool.name);`,
+  });
+  assert.deepEqual(offered[0].sort(), ["codemode", "read"]);
+  assert.match(codemodeResult, /\[\s*"read"\s*\]/);
+  assert.doesNotMatch(codemodeResult, /"bash"/);
+});
+
+test("bash resolves to a structured result inside codemode", async () => {
+  await runLoop({
+    sessionId: "codemode-bash-result",
+    enabled: true,
+    agentMode: "build",
+    permissions: { allow: ["Bash"] },
+    script: `
+      const result = await tools.bash({ command: "printf structured" });
+      return { output: result.output, exit: result.exit_code };`,
+  });
+  assert.match(codemodeResult, /"output": "structured"/);
+  assert.match(codemodeResult, /"exit": 0/);
+});
+
+test("a script receives complete nested output larger than 1 MiB", async () => {
+  await runLoop({
+    sessionId: "codemode-full-nested-output",
+    enabled: true,
+    mode: "only",
+    agentMode: "build",
+    permissions: { allow: ["Bash"] },
+    script: `
+      const result = await tools.bash({
+        command: "yes x | head -c 1200000; printf THE_END"
+      });
+      return {
+        length: result.output.length,
+        complete: result.output.endsWith("THE_END")
+      };`,
+  });
+  assert.match(codemodeResult, /"length": 1200007/);
+  assert.match(codemodeResult, /"complete": true/);
 });

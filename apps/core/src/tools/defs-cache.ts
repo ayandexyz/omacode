@@ -7,6 +7,14 @@
 //          same registry and emit tools.changed).
 // =============================================================================
 
+import {
+  renderToolSample,
+  toCodemodeIdentifier,
+} from "@earendil-works/pi-codemode";
+import {
+  NOT_CALLABLE_FROM_CODEMODE,
+  type CodemodeMode,
+} from "../codemode/settings.js";
 import { listTools, getTool } from "./index.js";
 import { bus } from "../bus/index.js";
 import { isReadOnlyMode, modeEnforcement } from "../permission/mode-policy.js";
@@ -111,9 +119,51 @@ export function unattendedToolDefs(mode?: AgentMode): ProviderToolDef[] {
   return [...getToolDefs(mode), ...[...UNATTENDED_ONLY_TOOLS].flatMap(defFor)];
 }
 
-/** `defs` plus the `codemode` tool, appended so the list's prefix is unchanged. */
-export function withCodemode(defs: ProviderToolDef[]): ProviderToolDef[] {
-  return [...defs, ...defFor(CODEMODE_TOOL)];
+/**
+ * `defs` plus the `codemode` tool, with pi's `mode: "on"` presentation: every
+ * tool a script can call says in one line how a script calls it, so the model
+ * meets codemode at each tool it reaches for, not only in codemode's own
+ * description (spec §4.12). Codemode is appended last.
+ */
+export function withCodemode(
+  defs: ProviderToolDef[],
+  mode: Exclude<CodemodeMode, "off"> = "on",
+): ProviderToolDef[] {
+  const callable = defs.filter((d) => !NOT_CALLABLE_FROM_CODEMODE.has(d.name));
+  if (mode === "only") {
+    const [codemode] = defFor(CODEMODE_TOOL);
+    if (!codemode) return [];
+    const declarations = callable.map((d) =>
+      renderToolSample({
+        name: d.name,
+        description: d.description,
+        inputSchema: d.parameters,
+        outputSchema: d.result ?? { type: "string" },
+      }),
+    );
+    return [
+      {
+        ...codemode,
+        description: `${codemode.description}\n\nCallable tools in codemode-only mode:\n\n${declarations.join("\n\n")}`,
+      },
+    ];
+  }
+  const described = defs.map((d) =>
+    NOT_CALLABLE_FROM_CODEMODE.has(d.name)
+      ? d
+      : {
+          ...d,
+          description: `${d.description.trim()}\n\nCodemode: \`tools.${toCodemodeIdentifier(d.name)}(args)\` resolves to ${codemodeResultSummary(d)}.`,
+        },
+  );
+  return [...described, ...defFor(CODEMODE_TOOL)];
+}
+
+function codemodeResultSummary(def: ProviderToolDef): string {
+  if (def.name === "bash") return "`{ output, exit_code, ... }`";
+  if (def.name === "glob") return "`string[]`";
+  if (def.name.startsWith("mcp__")) return "an MCP `CallToolResult` object";
+  return "a string";
 }
 
 function defFor(id: string): ProviderToolDef[] {

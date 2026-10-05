@@ -14,6 +14,7 @@ import type { ToolContext } from "./types.js";
 import type { Tool, ToolExecutionResult, JsonSchema } from "./tool.types.js";
 import { buildTool } from "./factory.js";
 import { getToolDefs, type ProviderToolDef } from "./defs-cache.js";
+import { NOT_CALLABLE_FROM_CODEMODE } from "../codemode/settings.js";
 import { discoveryGlobals } from "../codemode/discovery.js";
 import {
   CodemodeSourceError,
@@ -27,19 +28,7 @@ import {
   formatCodemodeResult,
 } from "../codemode/format.js";
 
-/**
- * Tools a script may not call: itself (no recursion), the night-run exit, and
- * subagents / monitors — long-lived things a script would start and then lose
- * track of when it ends (spec §4.3).
- */
-export const NOT_CALLABLE_FROM_CODEMODE = new Set([
-  "codemode",
-  "finish_iteration",
-  "agent",
-  "agent_send",
-  "agent_stop",
-  "monitor",
-]);
+export { NOT_CALLABLE_FROM_CODEMODE };
 
 /** pi's limit: a script's VM gets 256 MB. */
 const MEMORY_LIMIT_BYTES = 256 * 1024 * 1024;

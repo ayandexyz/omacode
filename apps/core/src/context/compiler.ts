@@ -4,6 +4,10 @@
 // CACHING: File tree by git HEAD + ignore patterns
 // =============================================================================
 
+import {
+  codemodeSystemGuidance,
+  loadCodemodeMode,
+} from "../codemode/settings.js";
 import type { AgentMode } from "../agent/types.js";
 import type { SystemBlock } from "../providers/types.js";
 import { compileInstructionsSection } from "./instructions.js";
@@ -50,7 +54,12 @@ Use with extreme caution - you can break things permanently.`,
 
 /** A named part of the static system prompt. */
 export interface SystemSegment {
-  id: "system-prompt" | "project-instructions" | "skills" | "agent-types" | "memory-guidance";
+  id:
+    | "system-prompt"
+    | "project-instructions"
+    | "skills"
+    | "agent-types"
+    | "memory-guidance";
   label: string;
   /** "" when the section has nothing to contribute (no CLAUDE.md, no skills). */
   text: string;
@@ -154,6 +163,10 @@ ${tree}`;
           modelPromptOverlay(provider, model),
           modelIdentity,
           this.compileSystemPrompt(),
+          (() => {
+            const mode = loadCodemodeMode(this.projectPath);
+            return mode === "off" ? "" : codemodeSystemGuidance(mode);
+          })(),
         ]),
       },
       {

@@ -123,7 +123,7 @@ import { planToolBatches, isConcurrencySafeCall } from "../tools/batching.js";
 import { getOutputStore } from "../tools/output-store/index.js";
 import { NOT_CALLABLE_FROM_CODEMODE } from "../tools/codemode.js";
 import type { NestedToolCaller } from "../tools/types.js";
-import { loadCodemodeEnabled } from "../codemode/settings.js";
+import { loadCodemodeMode, type CodemodeMode } from "../codemode/settings.js";
 import { markReadPruned } from "../tools/read-state.js";
 import {
   PruneState,
@@ -522,7 +522,7 @@ export class AgentLoop {
   private signalSettings?: SignalSettings;
   // Codemode (spec 2026-10-05-codemode.md): resolved once per loop, like the
   // signal settings, so `eval ab` can flip FREECODE_CODEMODE per trial.
-  private codemodeOn?: boolean;
+  private codemodeSetting?: CodemodeMode;
   // Codemode call ids whose script made a successful destructive call; read
   // (and cleared) when the batch reports `madeFileChange`.
   private codemodeMutated = new Set<string>();
@@ -2390,10 +2390,15 @@ export class AgentLoop {
       ? unattendedToolDefs(this.state.agentMode)
       : getToolDefs(this.state.agentMode);
     const allowed = this.state.role?.tools;
-    const offered = this.codemodeEnabled() ? withCodemode(base) : base;
-    const tools = allowed
-      ? offered.filter((t) => allowed.includes(t.name))
-      : offered;
+    const callable = allowed
+      ? base.filter((t) => allowed.includes(t.name))
+      : base;
+    const codemodeAllowed = !allowed || allowed.includes("codemode");
+    const mode = this.codemodeMode();
+    const tools =
+      mode !== "off" && codemodeAllowed
+        ? withCodemode(callable, mode)
+        : callable;
 
     // Cap tool results in old history turns to prevent token explosion on long
     // sessions. The model already processed those results fully when they were
@@ -3008,6 +3013,22 @@ export class AgentLoop {
       );
     }
 
+    // `only` is an execution boundary, not merely a provider-presentation
+    // preference. Providers may hallucinate a tool that was not declared (and
+    // old transcript continuations may still name one); letting that call run
+    // silently turns codemode-only back into additive mode. Nested calls carry
+    // parentCallId and remain valid because they came through the sandbox.
+    const codemodeOnly =
+      this.codemodeMode() === "only" &&
+      (!roleTools || roleTools.includes("codemode"));
+    if (!parentCallId && codemodeOnly && toolCall.tool !== "codemode") {
+      return this.denyToolCall(
+        toolCall,
+        "mode",
+        `Tool ${toolCall.tool} is not available directly in codemode-only mode. Call it from a codemode script.`,
+      );
+    }
+
     // PreToolUse Hook — can block or modify tool call
     const preResult = await this.hooks.runPreToolUse(toolCall, hookContext);
     this.recorder.recordHookTriggered(
@@ -3453,10 +3474,14 @@ export class AgentLoop {
   // Resolved once per loop. See codemode/settings.ts.
   // ===========================================================================
   private codemodeEnabled(): boolean {
-    if (this.codemodeOn === undefined) {
-      this.codemodeOn = loadCodemodeEnabled(this.state.projectPath);
+    return this.codemodeMode() !== "off";
+  }
+
+  private codemodeMode(): CodemodeMode {
+    if (this.codemodeSetting === undefined) {
+      this.codemodeSetting = loadCodemodeMode(this.state.projectPath);
     }
-    return this.codemodeOn;
+    return this.codemodeSetting;
   }
 
   /** The exact capability set a script may attempt, before per-call checks. */

@@ -30,7 +30,8 @@ import { estimateTokenCount } from "../compaction/tokens.js";
 import { MemoryService } from "../compaction/service.js";
 import { getMemoryGraphService } from "../memory/graph/index.js";
 import { renderRetrievedMemories } from "../memory/mem-prompt.js";
-import { getToolDefs } from "../tools/defs-cache.js";
+import { getToolDefs, withCodemode } from "../tools/defs-cache.js";
+import { loadCodemodeMode } from "../codemode/settings.js";
 import { renderTodoPromptBlock } from "../tools/todo.js";
 import { getModelContextLimit } from "../models-dev.js";
 import type { AgentMode } from "../agent/types.js";
@@ -118,7 +119,11 @@ export async function buildContextBreakdown(
   }
 
   // --- tool schemas ---------------------------------------------------------
-  const tools = getToolDefs(agentMode);
+  // Same list the loop offers: codemode rides on top when enabled.
+  const base = getToolDefs(agentMode);
+  const codemodeMode = loadCodemodeMode(projectPath);
+  const tools =
+    codemodeMode === "off" ? base : withCodemode(base, codemodeMode);
   let builtinTokens = 0;
   let mcpTokens = 0;
   let mcpCount = 0;
