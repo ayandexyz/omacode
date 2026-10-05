@@ -51,6 +51,30 @@ export function keepLastNUserTurns(
   return messages.slice();
 }
 
+/**
+ * Carry the latest codemode `store()` snapshot into the preserved tail when
+ * trimming would drop every message that held it (spec 2026-10-05-codemode.md
+ * §5.1): it is stamped onto the first preserved message's first part, which
+ * is where `loadCodemodeStore` will find it. Returns `preserve` unchanged when
+ * there is nothing to carry.
+ */
+export function carryCodemodeStore(
+  stored: SerializedMessage[],
+  preserve: SerializedMessage[],
+): SerializedMessage[] {
+  const latest = (msgs: SerializedMessage[]) => {
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      for (const part of msgs[i].parts) if (part.codemodeStore) return part.codemodeStore;
+    }
+    return undefined;
+  };
+  const snap = latest(stored);
+  const first = preserve[0];
+  if (!snap || latest(preserve) || !first || first.parts.length === 0) return preserve;
+  const [head, ...rest] = first.parts;
+  return [{ ...first, parts: [{ ...head, codemodeStore: snap }, ...rest] }, ...preserve.slice(1)];
+}
+
 export async function applyCompaction(opts: {
   memory: MemoryService;
   store: SessionStore;
@@ -81,7 +105,7 @@ export async function applyCompaction(opts: {
   if (preserve.length < stored.length) {
     await opts.store.replaceMessages(
       opts.sessionId,
-      preserve,
+      carryCodemodeStore(stored, preserve),
       opts.projectPath,
     );
   }
