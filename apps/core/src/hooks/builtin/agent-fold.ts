@@ -6,6 +6,13 @@
 // reads the bridge's `port.json` (port + token, loopback only) and does
 // nothing when it is missing. FREECODE_AGENT_FOLD=0 opts out altogether.
 //
+// A crashed bridge leaves `port.json` behind and frees its port for any local
+// user, so the file alone proves nothing. Before the token or any request
+// data is written, the server end of the socket must belong to this uid
+// (`/proc/net/tcp`), and a reply only counts if it carries the bridge's HMAC
+// over this request's nonce, keyed with `serverKey` from `port.json` (which
+// never goes over the wire). Anything unverifiable is treated as no bridge.
+//
 // The pane keeps its own prompt. Whichever surface answers first wins —
 // answerQuestion/answerPermission return false for the loser — and an answer
 // given in the pane clears the bar through the `resolved` endpoints.
@@ -15,7 +22,11 @@
 // so a one-shot `freecode run` must stay unsubscribed.
 // =============================================================================
 
+import { createHmac, randomBytes, timingSafeEqual } from "crypto";
+import { readFileSync } from "fs";
 import { readFile } from "fs/promises";
+import { request as httpRequest } from "http";
+import { connect, type Socket } from "net";
 import { homedir } from "os";
 import { join } from "path";
 import {
@@ -47,6 +58,7 @@ export interface AgentFoldIntegration {
 interface Connection {
   port: number;
   token: string;
+  serverKey: string;
 }
 
 // The bridge holds a request for five minutes; wait a little longer so its
@@ -162,26 +174,111 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 // Transport
 // =============================================================================
 
+// Bridges since Hommies 0.2.2 write port.json only under `hommies`;
+// AGENT_FOLD_DATA_DIR still works as an override.
 function portFile(): string {
   const dataDir =
+    process.env.HOMMIES_DATA_DIR ??
     process.env.AGENT_FOLD_DATA_DIR ??
     join(
       process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"),
-      "agent-fold",
+      "hommies",
     );
   return join(dataDir, "port.json");
 }
 
-/** Re-read per request: the bridge picks a new port and token on each start. */
+/**
+ * Re-read per request: the bridge picks a new port and token on each start.
+ * A file without `serverKey` (a bridge older than 0.1.6) cannot be verified,
+ * so it counts as no bridge.
+ */
 async function readConnection(): Promise<Connection | null> {
   try {
     const parsed = JSON.parse(await readFile(portFile(), "utf-8")) as Connection;
-    return Number.isInteger(parsed.port) && typeof parsed.token === "string"
+    return Number.isInteger(parsed.port) &&
+      parsed.port > 0 &&
+      parsed.port < 65536 &&
+      typeof parsed.token === "string" &&
+      typeof parsed.serverKey === "string" &&
+      parsed.serverKey.length > 0
       ? parsed
       : null;
   } catch {
     return null;
   }
+}
+
+const NONCE_HEADER = "x-hommies-nonce";
+const PROOF_HEADER = "x-hommies-proof";
+// Replies are small JSON; anything bigger is not the bridge.
+const MAX_REPLY_BYTES = 1024 * 1024;
+
+/** The bridge's HMAC over nonce, status, and body (Hommies `bridge-identity.ts`). */
+export function validProof(
+  serverKey: string,
+  nonce: string,
+  status: number,
+  body: string,
+  proof: unknown,
+): boolean {
+  if (typeof proof !== "string") return false;
+  const expected = Buffer.from(
+    createHmac("sha256", serverKey)
+      .update(`${nonce}\n${status}\n${body}`)
+      .digest("base64url"),
+  );
+  const actual = Buffer.from(proof);
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+/**
+ * The uid that owns the server end of the loopback connection from
+ * `localPort` to `port`, from a `/proc/net/tcp` table, or null when the table
+ * has no such row. An accepted socket keeps its listener's uid.
+ */
+export function serverSocketUid(
+  table: string,
+  port: number,
+  localPort: number,
+): number | null {
+  // 127.0.0.1 as /proc/net/tcp prints it, on little- and big-endian machines.
+  const hex = (p: number) => p.toString(16).toUpperCase().padStart(4, "0");
+  const loopback = ["0100007F", "7F000001"];
+  const server = loopback.map((a) => `${a}:${hex(port)}`);
+  const client = loopback.map((a) => `${a}:${hex(localPort)}`);
+  for (const line of table.split("\n").slice(1)) {
+    const [, local, remote, , , , , uid] = line.trim().split(/\s+/);
+    if (local === undefined || remote === undefined || uid === undefined) continue;
+    if (server.includes(local) && client.includes(remote) && /^\d+$/.test(uid)) {
+      return Number(uid);
+    }
+  }
+  return null;
+}
+
+/** Resolves only once the server end of the socket is known to be this user's. */
+function connectToOwnBridge(port: number): Promise<Socket> {
+  return new Promise((resolve, reject) => {
+    const socket = connect({ host: "127.0.0.1", port });
+    socket.once("error", reject);
+    socket.once("connect", () => {
+      socket.off("error", reject);
+      try {
+        const uid = typeof process.getuid === "function" ? process.getuid() : null;
+        const owner =
+          socket.localPort === undefined
+            ? null
+            : serverSocketUid(readFileSync("/proc/net/tcp", "utf8"), port, socket.localPort);
+        if (uid === null || owner !== uid) {
+          throw new Error("the bridge port is not held by this user");
+        }
+        resolve(socket);
+      } catch (error) {
+        socket.destroy();
+        reject(error);
+      }
+    });
+  });
 }
 
 async function post(
@@ -192,25 +289,57 @@ async function post(
   const connection = await readConnection();
   if (!connection) return undefined;
   try {
-    const res = await fetch(
-      `http://127.0.0.1:${connection.port}/v1/providers/omacode/${path}`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-agent-fold-token": connection.token,
+    const nonce = randomBytes(24).toString("base64url");
+    const payload = JSON.stringify(body);
+    const socket = await connectToOwnBridge(connection.port);
+    const text = await new Promise<string>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: "127.0.0.1",
+          port: connection.port,
+          path: `/v1/providers/omacode/${path}`,
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "content-length": Buffer.byteLength(payload),
+            "x-agent-fold-token": connection.token,
+            [NONCE_HEADER]: nonce,
+          },
+          // The verified socket, not a pooled or fresh one.
+          createConnection: () => socket,
         },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs),
-      },
-    );
-    if (!res.ok) return undefined;
-    return await res.json().catch(() => undefined);
+        (res) => {
+          let reply = "";
+          res.setEncoding("utf8");
+          res.on("data", (chunk: string) => {
+            reply += chunk;
+            if (reply.length > MAX_REPLY_BYTES) req.destroy(new Error("reply too large"));
+          });
+          res.on("end", () => {
+            const status = res.statusCode ?? 0;
+            if (!validProof(connection.serverKey, nonce, status, reply, res.headers[PROOF_HEADER])) {
+              reject(new Error("bridge reply could not be verified"));
+            } else if (status < 200 || status >= 300) {
+              reject(new Error(`bridge answered ${status}`));
+            } else {
+              resolve(reply);
+            }
+          });
+          res.on("error", reject);
+        },
+      );
+      const timer = setTimeout(() => req.destroy(new Error("bridge request timed out")), timeoutMs);
+      req.on("close", () => clearTimeout(timer));
+      req.on("error", reject);
+      req.end(payload);
+    });
+    return JSON.parse(text) as unknown;
   } catch {
     // Swallowed on purpose: the bar is optional and must not fail a turn.
     return undefined;
   }
 }
+
 
 // =============================================================================
 // Registration

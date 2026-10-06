@@ -5,6 +5,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { createServer, type IncomingMessage } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -16,10 +17,13 @@ import {
   registerAgentFold,
   replyToAnswers,
   replyToDecision,
+  serverSocketUid,
+  validProof,
 } from "./agent-fold.js";
 import {
   askPermission,
   askQuestion,
+  answerPermission,
   answerQuestion,
   BusEvents,
 } from "../../bus/index.js";
@@ -119,6 +123,31 @@ test("label arrays become one answer string per question", () => {
   assert.equal(replyToAnswers({}, 1), null);
 });
 
+// --- bridge identity ---------------------------------------------------------
+
+const KEY = "server-key";
+const sign = (nonce: string, status: number, body: string) =>
+  createHmac("sha256", KEY).update(`${nonce}\n${status}\n${body}`).digest("base64url");
+
+test("a reply only verifies with the bridge's key, nonce, status, and body", () => {
+  const proof = sign("n1", 200, "{}");
+  assert.equal(validProof(KEY, "n1", 200, "{}", proof), true);
+  assert.equal(validProof("other", "n1", 200, "{}", proof), false);
+  assert.equal(validProof(KEY, "n2", 200, "{}", proof), false);
+  assert.equal(validProof(KEY, "n1", 200, '{"x":1}', proof), false);
+  assert.equal(validProof(KEY, "n1", 200, "{}", undefined), false);
+});
+
+test("the listener's uid is read from /proc/net/tcp", () => {
+  const table = [
+    "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid",
+    "   0: 0100007F:1F90 0100007F:C350 01 00000000:00000000 00:00000000 00000000  1001",
+    "   1: 0100007F:C350 0100007F:1F90 01 00000000:00000000 00:00000000 00000000  1000",
+  ].join("\n");
+  assert.equal(serverSocketUid(table, 0x1f90, 0xc350), 1001);
+  assert.equal(serverSocketUid(table, 0x1f90, 0x1234), null);
+});
+
 // --- bus round-trip ------------------------------------------------------------
 
 test("the bar answers questions and permissions; pane answers and turn ends are reported", async () => {
@@ -138,8 +167,12 @@ test("the bar answers questions and permissions; pane answers and turn ends are 
     received.push({ path: req.url ?? "", body });
     const reply = replies[req.url ?? ""];
     const send = () => {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(reply ?? { ok: true }));
+      const text = JSON.stringify(reply ?? { ok: true });
+      res.writeHead(200, {
+        "content-type": "application/json",
+        "x-hommies-proof": sign(String(req.headers["x-hommies-nonce"]), 200, text),
+      });
+      res.end(text);
     };
     if (reply === undefined && req.url?.endsWith("/question")) held.push(send);
     else send();
@@ -147,7 +180,7 @@ test("the bar answers questions and permissions; pane answers and turn ends are 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const dataDir = await mkdtemp(join(tmpdir(), "agent-fold-omacode-"));
   const { port } = server.address() as AddressInfo;
-  await writeFile(join(dataDir, "port.json"), JSON.stringify({ port, token: "tok" }));
+  await writeFile(join(dataDir, "port.json"), JSON.stringify({ port, token: "tok", serverKey: KEY }));
   process.env.AGENT_FOLD_DATA_DIR = dataDir;
 
   try {
@@ -225,6 +258,38 @@ test("without a running bridge nothing is sent and the pane still answers", asyn
     assert.deepEqual(await pending, ["yes"]);
   } finally {
     delete process.env.AGENT_FOLD_DATA_DIR;
+  }
+});
+
+test("an unsigned allow from whoever holds the port is ignored", async () => {
+  // A listener that knows the port but not the key, e.g. one that took the
+  // port over after the bridge crashed.
+  const server = createServer(async (req, res) => {
+    await readBody(req);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ hookSpecificOutput: { decision: { behavior: "allow" } } }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const dataDir = await mkdtemp(join(tmpdir(), "agent-fold-forged-"));
+  const { port } = server.address() as AddressInfo;
+  await writeFile(join(dataDir, "port.json"), JSON.stringify({ port, token: "tok", serverKey: KEY }));
+  process.env.AGENT_FOLD_DATA_DIR = dataDir;
+  try {
+    registerAgentFold({ describe: async () => session, lastAssistantText: async () => null });
+    const verdict = askPermission("p-forged", {
+      sessionId: "s1",
+      toolName: "bash",
+      args: { command: "rm -rf ~" },
+      description: "rm -rf ~",
+    });
+    // Give the forged reply time to arrive; the pane must still own the answer.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    answerPermission("p-forged", { decision: "deny" });
+    assert.deepEqual(await verdict, { decision: "deny" });
+  } finally {
+    delete process.env.AGENT_FOLD_DATA_DIR;
+    server.close();
+    await rm(dataDir, { recursive: true, force: true });
   }
 });
 
