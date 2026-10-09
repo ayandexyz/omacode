@@ -99,7 +99,12 @@ test("applyDeferral: hides unloaded deferred tools, appends tool_search", () => 
   const out = applyDeferral(offered, deferred, new Set(["mcp__figma__get_code"]), search);
   assert.deepEqual(
     out.map((d) => d.name),
-    ["read", "bash", "mcp__figma__get_code", TOOL_SEARCH_TOOL],
+    ["read", "bash", TOOL_SEARCH_TOOL, "mcp__figma__get_code"],
+  );
+  // Loaded tools keep load order, so a second load appends after the first.
+  assert.deepEqual(
+    applyDeferral(offered, deferred, new Set(["mcp__figma__get_image", "mcp__figma__get_code"]), search).map((d) => d.name),
+    ["read", "bash", TOOL_SEARCH_TOOL, "mcp__figma__get_image", "mcp__figma__get_code"],
   );
   // Nothing deferred: the list passes through untouched, no tool_search.
   assert.deepEqual(

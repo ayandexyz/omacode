@@ -155,6 +155,37 @@ caching, because the tool list precedes everything. Mitigations:
   (`recordInvalidation`) when the loaded set grows, so D2 attributes the miss
   instead of alarming — no change to `cache-miss.ts` was needed.
 
+#### 4.2.2 Path B on MiniMax-M3, live (2026-10-10)
+
+- **Works end to end.** Offered only built-ins + `tool_search`, the model
+  called `tool_search("get current weather")` unprompted; our BM25 ranked the
+  right tool first of 31; the next request called it with correct arguments.
+- **MiniMax ignores `defer_loading`** (no error): all deferred schemas were
+  billed (9,005 input vs 3,486) and the model called one without searching.
+  So `supportsNativeDeferral` keying on the provider id, not the SDK
+  package, is load-bearing.
+- **A load re-sends the conversation once.** MiniMax serializes system →
+  tools → messages, so changing the list invalidates everything after the
+  change. ~20K-token history, 25.8K prompt:
+
+  | request | cache read | uncached |
+  | --- | --- | --- |
+  | warm, no change (control) | 25,799 | 15 |
+  | load, tool inserted in sorted position | 5,864 | 20,009 |
+  | load, tool appended after `tool_search` | **9,059** | **16,814** |
+  | next request | 25,858 | 15 |
+
+  Hence loaded tools go last, in load order (`applyDeferral`): every
+  built-in stays cached, and a second load leaves the first in place. The
+  conversation part is inherent to this path and is the price of a load.
+- **When it pays on MiniMax.** Per load you pay roughly the conversation at
+  full input price once; deferral saves the deferred schemas on every
+  request. With cache reads at ~10%: worth it when
+  `deferredTokens × 0.1 × requests > loads × conversationTokens × 0.9`, e.g.
+  20K deferred over 100 requests (≈200K) beats 2 loads at a 50K conversation
+  (≈90K). Few loads, many requests, big MCP servers → win; the `minTokens`
+  threshold is the knob, and Phase 4's `eval ab` decides the default.
+
 pi's inline-tools approach (`tool_addition` blocks) is **out of scope**: the
 AI SDK does not model them, and path A already keeps misses at zero on
 Anthropic.
@@ -235,8 +266,9 @@ Not a path or URL tool.
 
 1. ~~Does path A work on Claude 5 and through OAuth?~~ Yes — §4.2.1. Haiku 4.5
    is untested and gated off.
-2. Does MiniMax's implicit cache survive a grown tool list, or is every load a
-   full miss there too? (Its traffic is ~90% of requests.)
+2. ~~Does MiniMax's cache survive a grown tool list?~~ Partly — the system
+   and every tool before the change are read back, the conversation is
+   re-sent once per load. §4.2.2.
 3. Should read-only modes defer MCP tools that are read-only (`readOnlyHint`)?
    Today read-only modes already drop non-read-only tools.
 4. Should the active set ever shrink (e.g. on compaction)? pi never removes;

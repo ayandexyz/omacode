@@ -194,7 +194,12 @@ export function loadedFromHistory(
  * The list to send. `tool_search` is offered whenever anything is deferred —
  * even once all of it is loaded — so the list does not flip back and forth.
  *
- * Search path: deferred tools out unless loaded.
+ * Search path: deferred tools out unless loaded; loaded ones go LAST, in load
+ * order (history order). Providers serialize the tool list before the
+ * conversation, so a load re-sends everything after the point it changed —
+ * at the end, every built-in stays cached and a second load leaves the first
+ * one's position alone. (MiniMax-M3, live 2026-10-10: a mid-list insert read
+ * 5.9K of a 25.8K prompt back from cache.)
  * Native path: every deferred tool in, marked `deferLoading`, after the rest —
  * loaded or not, so the list is the same on every request. A loaded one is
  * made visible by the `tool_reference` in history, not by this list.
@@ -216,8 +221,10 @@ export function applyDeferral(
         .map((d) => ({ ...d, deferLoading: true })),
     ];
   }
+  const byName = new Map(offered.map((d) => [d.name, d]));
   return [
-    ...offered.filter((d) => !deferred.has(d.name) || loaded.has(d.name)),
+    ...offered.filter((d) => !deferred.has(d.name)),
     toolSearch,
+    ...[...loaded].flatMap((name) => byName.get(name) ?? []),
   ];
 }
