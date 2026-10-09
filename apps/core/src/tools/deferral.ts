@@ -15,9 +15,17 @@
 // old loads; it already invalidates the prefix, and a dropped tool is one
 // search away.
 //
+// Two paths (spec §4.2). Everywhere: deferred tools are left out of the list
+// and a load changes it — one cache miss per load. On Anthropic models that
+// support it ("native"): every tool is sent from the first request, deferred
+// ones with `defer_loading`, and the `tool_search` result carries
+// `tool_reference` blocks that Anthropic expands in place — the list never
+// changes, so nothing is re-sent. Same search, same guard, same derived set.
+//
 // Settings — project → user → default, like checkpoint/settings.ts:
-//   { "tools": { "deferral": { "enabled": true, "minTokens": 4000 } } }
-// Env: FREECODE_DEFER_TOOLS — "1" on, "0" off, beating the files.
+//   { "tools": { "deferral": { "enabled": true, "minTokens": 4000, "native": true } } }
+// Env: FREECODE_DEFER_TOOLS / FREECODE_DEFER_TOOLS_NATIVE — "1" on, "0" off,
+// beating the files.
 // Off by default: it changes what the model sees, so the default flips only on
 // an `eval ab` delta (spec §5 Phase 4).
 // =============================================================================
@@ -39,11 +47,14 @@ export interface DeferralSettings {
    * load's cache miss costs more than the schemas would (spec §4.5).
    */
   minTokens: number;
+  /** Use Anthropic's `defer_loading` + `tool_reference` where the model supports it. */
+  native: boolean;
 }
 
 export const DEFAULT_DEFERRAL_SETTINGS: DeferralSettings = {
   enabled: false,
   minTokens: 4000,
+  native: true,
 };
 
 type Scope = Partial<DeferralSettings>;
@@ -64,6 +75,7 @@ export function resolveDeferralSettings(
   env: NodeJS.ProcessEnv = process.env,
 ): DeferralSettings {
   const enabled = scopes.find((s) => typeof s.enabled === "boolean")?.enabled;
+  const native = scopes.find((s) => typeof s.native === "boolean")?.native;
   const minTokens = scopes.find(
     (s) =>
       typeof s.minTokens === "number" &&
@@ -76,6 +88,10 @@ export function resolveDeferralSettings(
       enabled ??
       DEFAULT_DEFERRAL_SETTINGS.enabled,
     minTokens: minTokens ?? DEFAULT_DEFERRAL_SETTINGS.minTokens,
+    native:
+      envFlag(env.FREECODE_DEFER_TOOLS_NATIVE) ??
+      native ??
+      DEFAULT_DEFERRAL_SETTINGS.native,
   };
 }
 
@@ -92,6 +108,26 @@ export function loadDeferralSettings(projectRoot: string): DeferralSettings {
 /** Only MCP tools are deferred; built-ins are used every turn (spec §2). */
 export function isDeferrable(name: string): boolean {
   return name.startsWith("mcp__");
+}
+
+/**
+ * Whether the native path applies: Anthropic's own endpoint, on a model with
+ * tool search (Sonnet/Opus 4.5+, any 5-family model). MiniMax and Z.ai speak
+ * the same SDK but not this feature, hence the provider id, not the package.
+ * An unrecognised id is false — the other path works everywhere.
+ */
+export function supportsNativeDeferral(
+  provider: string,
+  model: string | undefined,
+): boolean {
+  if (provider !== "anthropic" || !model) return false;
+  // `(?!\d)` keeps a date suffix from reading as a minor: claude-sonnet-4-20250514.
+  const m = /claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d)(?!\d))?/.exec(model);
+  if (!m) return false;
+  const major = Number(m[2]);
+  const minor = m[3] ? Number(m[3]) : 0;
+  if (m[1] === "haiku") return major >= 5;
+  return major > 4 || (major === 4 && minor >= 5);
 }
 
 /** chars/4 over the serialized schema — the estimator `/context` uses. */
@@ -155,17 +191,31 @@ export function loadedFromHistory(
 }
 
 /**
- * The list to send: deferred tools out unless loaded, `tool_search` in. It is
- * offered whenever anything is deferred — even once all of it is loaded — so
- * the list does not flip back and forth and cost a miss each way.
+ * The list to send. `tool_search` is offered whenever anything is deferred —
+ * even once all of it is loaded — so the list does not flip back and forth.
+ *
+ * Search path: deferred tools out unless loaded.
+ * Native path: every deferred tool in, marked `deferLoading`, after the rest —
+ * loaded or not, so the list is the same on every request. A loaded one is
+ * made visible by the `tool_reference` in history, not by this list.
  */
 export function applyDeferral(
   offered: readonly ProviderToolDef[],
   deferred: ReadonlySet<string>,
   loaded: ReadonlySet<string>,
   toolSearch: ProviderToolDef | undefined,
+  native = false,
 ): ProviderToolDef[] {
   if (deferred.size === 0 || !toolSearch) return [...offered];
+  if (native) {
+    return [
+      ...offered.filter((d) => !deferred.has(d.name)),
+      toolSearch,
+      ...offered
+        .filter((d) => deferred.has(d.name))
+        .map((d) => ({ ...d, deferLoading: true })),
+    ];
+  }
   return [
     ...offered.filter((d) => !deferred.has(d.name) || loaded.has(d.name)),
     toolSearch,

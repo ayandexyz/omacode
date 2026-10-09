@@ -1,9 +1,9 @@
 # Deferred Tool Loading
 
-**Status:** Path B built 2026-10-10 on `feat/deferred-tool-loading` (§4.1–4.5,
-`deferredCount`); off by default. Not built: path A (§4.2), the MCP server
-prompt line (§4.6), `/context` deferred row, `tool.search` event (§4.7),
-the Phase 0 measurement and the Phase 4 `eval ab`.
+**Status:** Paths A and B built 2026-10-10 on `feat/deferred-tool-loading`
+(§4.1–4.5, `deferredCount`); path A live-verified (§4.2.1). Off by default.
+Not built: the MCP server prompt line (§4.6), `/context` deferred row,
+`tool.search` event (§4.7), the Phase 0 measurement and the Phase 4 `eval ab`.
 **Date:** 2026-10-10
 **Prior art:** pi (`earendil-works/pi`) — `packages/coding-agent/src/extensions/tool-search/`
 and `packages/ai/src/api/anthropic-messages.ts` (native tool changes).
@@ -95,18 +95,53 @@ the session restored its active set before MCP servers reconnected.
 
 ### 4.2 Two paths, chosen by SDK package (same rule as `requestShape`)
 
-**A. `@ai-sdk/anthropic` → Anthropic server-side tool search.**
-The installed `@ai-sdk/anthropic` 3.0.80 already ships
-`anthropic.tools.toolSearchBm25_20251119()` and per-tool
-`providerOptions: { anthropic: { deferLoading: true } }`. Every tool is sent
-from request one; deferred ones carry `defer_loading: true` and are not loaded
-into context until Anthropic's own search returns a `tool_reference`. The
-`tools` array never changes during the session, so **the cache prefix is
-untouched** — RC8 holds with no new machinery. Model support must be checked
-per model (SDK doc lists Opus 4.5 / Sonnet 4.5); unsupported model → path B.
-MiniMax and Z.ai also route through `@ai-sdk/anthropic` but almost certainly
-reject the server tool, so path A is gated on `provider === "anthropic"`, not on
-the package alone.
+**A. Anthropic → custom tool search with `defer_loading` + `tool_reference`.**
+*Built differently from the draft*, which used Anthropic's server-side
+`toolSearchBm25_20251119` tool. That would put provider-executed
+`server_tool_use` / `tool_search_tool_result` blocks into history, which
+FreeCode's `Message` cannot store or round-trip. Anthropic also supports a
+**custom** search: any client tool may return `tool_reference` blocks, and the
+SDK emits one from a `custom` tool-result part
+(`providerOptions.anthropic.type: "tool-reference"`). So path A keeps FreeCode's
+own `tool_search` and changes only the wire:
+
+- every tool is sent from request one; deferred ones are sent last with
+  `providerOptions.anthropic.deferLoading` → `defer_loading: true`, loaded or
+  not, so the `tools` array never changes (`applyDeferral(…, native)`);
+- the cache anchor goes on the last non-deferred tool (`buildToolsParam`);
+- `convertToCoreMessages(messages, deferredTools)` turns a `tool_search`
+  result into `tool_reference` blocks for the names this request declares
+  deferred (an undeclared name is dropped — referencing one is a 400);
+- `tool_search` results are exempt from old-result pruning, since replacing
+  one would unload its tools.
+
+Same ranking, guard and derived loaded set as path B. Gated by
+`supportsNativeDeferral(provider, model)`: provider id `anthropic` (MiniMax
+and Z.ai share the SDK, not the feature) and Sonnet/Opus ≥ 4.5 or any 5-family
+model; anything else falls back to path B. `tools.deferral.native` /
+`FREECODE_DEFER_TOOLS_NATIVE=0` forces path B, e.g. for an A/B.
+
+#### 4.2.1 Live verification (2026-10-10, OAuth subscription)
+
+- **References only.** A tool result mixing `tool_reference` with text is
+  rejected: *"Tool definitions/code execution functions cannot be mixed with
+  other content"*. The result therefore carries the references alone.
+- **Works** on `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-sonnet-5`
+  through the subscription path, with no extra beta header: the model calls
+  the referenced tool with correct arguments and never sees an unreferenced
+  deferred one.
+- **Cache holds across a load.** Same tools on both requests, 31 deferred:
+
+  | model | request | input | cache read | cache write |
+  | --- | --- | --- | --- | --- |
+  | sonnet-4-5 | before load | 4,141 | 0 | 4,138 |
+  | sonnet-4-5 | after load | 4,276 | **4,138** | 131 |
+  | sonnet-5 | before load | 5,141 | 0 | 5,139 |
+  | sonnet-5 | after load | 5,284 | **5,139** | 143 |
+
+  The whole prior prefix is read back; only the new turn is written. The 31
+  deferred definitions (~4K tokens) do not count toward input at all. On the
+  first request the model chose `tool_search` by itself.
 
 **B. Everything else → client-side `tool_search`.**
 A normal FreeCode tool (`tools/tool-search.ts`) ranking with the existing
@@ -120,9 +155,9 @@ caching, because the tool list precedes everything. Mitigations:
   (`recordInvalidation`) when the loaded set grows, so D2 attributes the miss
   instead of alarming — no change to `cache-miss.ts` was needed.
 
-pi's inline-tools approach (keeping misses at zero on Anthropic without server
-search) is **out of scope**: the AI SDK does not model `tool_addition` blocks,
-and path A already covers Anthropic.
+pi's inline-tools approach (`tool_addition` blocks) is **out of scope**: the
+AI SDK does not model them, and path A already keeps misses at zero on
+Anthropic.
 
 ### 4.3 State: the active set
 
@@ -184,7 +219,7 @@ tools' estimated schema size exceeds `tools.deferral.minTokens` (default
 | 0 | Measure: per-server MCP schema tokens for figma + agentmemory (and a 3rd common server); add `deferredCount` to `model.request` | A real number for §2's "15–25K" |
 | 1 | Exposure flag, active set in session store, `getToolDefs(mode, active)`, execution guard, unit tests | `defs-cache.test.ts` + store round-trip incl. `/tree` + resume-after-reconnect |
 | 2 | Path B: `tool_search` + BM25 + `tool_load` miss classification | Tool works on MiniMax end-to-end; no D2 alarm on a load |
-| 3 | Path A: Anthropic server tool search + `deferLoading` | Cache read ratio unchanged vs. deferral-off on an MCP-heavy session |
+| 3 | Path A: `deferLoading` + `tool_reference` from our `tool_search` | Cache read across a load = prior prefix — **met live, §4.2.1** |
 | 4 | `eval ab` (deferral on vs. off) on an MCP-heavy case set | Pass rate not worse; input tokens/turn down; then decide the default |
 
 Phase 4 is required by the eval-driven rule in `CLAUDE.md`: this changes what
@@ -198,8 +233,8 @@ Not a path or URL tool.
 
 ## 7. Open questions
 
-1. Does Anthropic's server tool search work on the Claude 5 models and through
-   the OAuth (subscription) path? Phase 3 must test both before shipping path A.
+1. ~~Does path A work on Claude 5 and through OAuth?~~ Yes — §4.2.1. Haiku 4.5
+   is untested and gated off.
 2. Does MiniMax's implicit cache survive a grown tool list, or is every load a
    full miss there too? (Its traffic is ~90% of requests.)
 3. Should read-only modes defer MCP tools that are read-only (`readOnlyHint`)?

@@ -47,6 +47,11 @@ export interface ToolDef {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+  /**
+   * Anthropic `defer_loading`: declared but kept out of context until a
+   * `tool_reference` in a tool result loads it (tools/deferral.ts).
+   */
+  deferLoading?: boolean;
 }
 
 export interface SystemBlock {

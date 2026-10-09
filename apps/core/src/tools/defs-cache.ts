@@ -16,6 +16,8 @@ export interface ProviderToolDef {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+  /** Anthropic `defer_loading` — set only by the native deferral path. */
+  deferLoading?: boolean;
 }
 
 let cachedAll: ProviderToolDef[] | null = null;

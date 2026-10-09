@@ -139,7 +139,10 @@ export function buildGenerateOptions(
       generateOptions.system = buildAnthropicSystemParam(opts.system);
     }
     if (opts.messages) {
-      const coreMessages = convertToCoreMessages(opts.messages);
+      const deferred = new Set(
+        (opts.tools ?? []).filter((t) => t.deferLoading).map((t) => t.name),
+      );
+      const coreMessages = convertToCoreMessages(opts.messages, deferred);
       applyMessageCaching(coreMessages);
       // After the anchors, on purpose: the tail changes every request, so it
       // must never carry a breakpoint — the write anchor has to land on the

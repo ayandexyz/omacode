@@ -11,6 +11,7 @@ import {
   parseLoadedNames,
   resolveDeferralSettings,
   selectDeferred,
+  supportsNativeDeferral,
   TOOL_SEARCH_TOOL,
 } from "./deferral.js";
 import { searchMcpTools } from "./tool-search.js";
@@ -134,4 +135,41 @@ test("searchMcpTools ranks by description, server name and schema text", () => {
   assert.equal(searchMcpTools("closed", 8, candidates)[0]?.name, "mcp__github__list_issues");
   assert.equal(searchMcpTools("figma", 1, candidates).length, 1);
   assert.deepEqual(searchMcpTools("kubernetes", 8, candidates), []);
+});
+
+test("supportsNativeDeferral: Anthropic Sonnet/Opus 4.5+ and the 5 family only", () => {
+  const yes = ["claude-sonnet-4-5", "claude-sonnet-4-5-20250929", "claude-opus-4-6", "claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5", "claude-haiku-5"];
+  const no = ["claude-sonnet-4-20250514", "claude-opus-4-1", "claude-haiku-4-5-20251001", "claude-3-7-sonnet", "gpt-5"];
+  for (const m of yes) assert.ok(supportsNativeDeferral("anthropic", m), m);
+  for (const m of no) assert.ok(!supportsNativeDeferral("anthropic", m), m);
+  assert.ok(!supportsNativeDeferral("minimax", "claude-sonnet-4-5"));
+  assert.ok(!supportsNativeDeferral("anthropic", undefined));
+});
+
+test("settings: native defaults on, env beats files", () => {
+  assert.equal(resolveDeferralSettings([], {}).native, true);
+  assert.equal(resolveDeferralSettings([{ native: false }], {}).native, false);
+  assert.equal(
+    resolveDeferralSettings([{ native: false }], { FREECODE_DEFER_TOOLS_NATIVE: "1" }).native,
+    true,
+  );
+});
+
+test("applyDeferral native: every deferred tool sent last with deferLoading, same list loaded or not", () => {
+  const offered = [def("bash"), MCP[0], def("read"), MCP[1]];
+  const search = def(TOOL_SEARCH_TOOL);
+  const deferred = selectDeferred(offered, ON);
+  const before = applyDeferral(offered, deferred, new Set(), search, true);
+  const after = applyDeferral(offered, deferred, new Set(["mcp__figma__get_code"]), search, true);
+  assert.deepEqual(before, after, "loading never changes the native list");
+  assert.deepEqual(
+    before.map((d) => [d.name, d.deferLoading ?? false]),
+    [
+      ["bash", false],
+      ["read", false],
+      [TOOL_SEARCH_TOOL, false],
+      ["mcp__figma__get_code", true],
+      ["mcp__figma__get_image", true],
+    ],
+  );
 });

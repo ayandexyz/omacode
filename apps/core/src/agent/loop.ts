@@ -123,6 +123,7 @@ import {
   loadDeferralSettings,
   loadedFromHistory,
   selectDeferred,
+  supportsNativeDeferral,
   TOOL_SEARCH_TOOL,
   type DeferralSettings,
 } from "../tools/deferral.js";
@@ -711,6 +712,9 @@ export class AgentLoop {
       if (msg.role !== "assistant") return;
       msg.parts.forEach((part, partIndex) => {
         if (part.type !== "tool" || !part.result) return;
+        // Tiny, and on the native deferral path its tool_references are what
+        // keep loaded tools visible — replacing it would unload them.
+        if (part.tool.tool === TOOL_SEARCH_TOOL) return;
         const candidate: Candidate = {
           id: part.tool.id,
           size: part.result.length,
@@ -2396,7 +2400,11 @@ export class AgentLoop {
       : getToolDefs(this.state.agentMode);
     const tools = allowed
       ? offered.filter((t) => allowed.includes(t.name))
-      : this.applyToolDeferral(offered);
+      : this.applyToolDeferral(
+          offered,
+          provider,
+          model ?? aiProvider.info.defaultModel,
+        );
 
     // Cap tool results in old history turns to prevent token explosion on long
     // sessions. The model already processed those results fully when they were
@@ -2956,15 +2964,23 @@ export class AgentLoop {
   // Skipped for a role with an allowlist: its list is short and explicit, and
   // tool_search would sit outside it.
   // ===========================================================================
-  private applyToolDeferral(offered: ProviderToolDef[]): ProviderToolDef[] {
+  private applyToolDeferral(
+    offered: ProviderToolDef[],
+    provider: string,
+    model: string | undefined,
+  ): ProviderToolDef[] {
     this.deferralSettings ??= loadDeferralSettings(this.state.projectPath);
     const deferred = selectDeferred(offered, this.deferralSettings);
     const loaded = loadedFromHistory(this.history, deferred);
-    // The tool list precedes the whole cached prefix, so a load re-sends it.
-    // Unavoidable and expected — documented so D2 does not call it a bust.
+    const native =
+      this.deferralSettings.native && supportsNativeDeferral(provider, model);
+    // Search path: the tool list precedes the whole cached prefix, so a load
+    // re-sends it. Unavoidable and expected — documented so D2 does not call
+    // it a bust. (Native path: the list never changes, nothing to document.)
     // Not on this loop's first deferring request: a resumed session's loads
     // are already in the prefix it was cached with.
     if (
+      !native &&
       this.deferredTools.size > 0 &&
       loaded.size > this.loadedTools.size
     ) {
@@ -2976,7 +2992,7 @@ export class AgentLoop {
     }
     this.deferredTools = deferred;
     this.loadedTools = loaded;
-    return applyDeferral(offered, deferred, loaded, toolSearchDef());
+    return applyDeferral(offered, deferred, loaded, toolSearchDef(), native);
   }
 
   // ===========================================================================

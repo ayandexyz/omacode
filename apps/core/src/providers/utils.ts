@@ -3,6 +3,7 @@ import { jsonSchema } from "ai";
 import type { Message } from "../agent/types.js";
 import type { MultimodalContentPart, SystemBlock, ToolDef } from "./types.js";
 import { logger } from "../utils/logger.js";
+import { parseLoadedNames, TOOL_SEARCH_TOOL } from "../tools/deferral.js";
 
 /**
  * Converts FreeCode's ToolDef[] into the AI SDK's tools map, wrapping each
@@ -30,6 +31,9 @@ export function buildToolsParam(
       acc[t.name] = {
         description: t.description,
         inputSchema: jsonSchema(t.parameters as Record<string, unknown>),
+        ...(t.deferLoading
+          ? { providerOptions: { anthropic: { deferLoading: true } } }
+          : {}),
       };
       return acc;
     },
@@ -42,8 +46,9 @@ export function buildToolsParam(
   // input tokens on every turn instead of the ~10% cache-read rate, even
   // though the system prompt right after it is cached. Anthropic caches
   // everything up to and including the marked block, so tagging the last
-  // tool caches the whole tools array.
-  const lastTool = tools[tools.length - 1];
+  // tool caches the whole tools array. A deferred tool is not in the prompt,
+  // so the anchor goes on the last one that is (they are sent last).
+  const lastTool = tools.filter((t) => !t.deferLoading).at(-1);
   if (lastTool) {
     result[lastTool.name].providerOptions = {
       anthropic: { cacheControl: anthropicCacheControl() },
@@ -265,10 +270,42 @@ export function isPlainObject(
 }
 
 /**
+ * A `tool_search` result as Anthropic's custom tool search wants it: a
+ * `tool_reference` per loaded tool that this request declares with
+ * `defer_loading` — which is what makes the tool visible to the model. A name
+ * the request does not declare deferred is left out: referencing it is a 400.
+ *
+ * References ONLY, no text: the API rejects a result that mixes them ("Tool
+ * definitions/code execution functions cannot be mixed with other content",
+ * live 2026-10-10). The model loses the "Loaded N tools" line, and gets the
+ * tools themselves instead.
+ */
+function toolSearchOutput(
+  text: string,
+  deferredTools: ReadonlySet<string>,
+): { type: "content"; value: unknown[] } | undefined {
+  const names = parseLoadedNames(text).filter((n) => deferredTools.has(n));
+  if (names.length === 0) return undefined;
+  return {
+    type: "content",
+    value: names.map((toolName) => ({
+      type: "custom",
+      providerOptions: { anthropic: { type: "tool-reference", toolName } },
+    })),
+  };
+}
+
+/**
  * Transforms FreeCode internal Message structures to Vercel AI SDK ModelMessage formats.
  * Correctly splits assistant tool-calls and their results into consecutive assistant and tool messages.
+ *
+ * `deferredTools` — names this request declares with `defer_loading`. Only
+ * the Anthropic shape passes it; see `toolSearchOutput`.
  */
-export function convertToCoreMessages(messages: Message[]): ModelMessage[] {
+export function convertToCoreMessages(
+  messages: Message[],
+  deferredTools?: ReadonlySet<string>,
+): ModelMessage[] {
   const coreMessages: ModelMessage[] = [];
 
   for (const msg of messages) {
@@ -328,7 +365,9 @@ export function convertToCoreMessages(messages: Message[]): ModelMessage[] {
         type: "tool-result";
         toolCallId: string;
         toolName: string;
-        output: { type: "text"; value: string };
+        output:
+          | { type: "text"; value: string }
+          | { type: "content"; value: unknown[] };
       }> = [];
 
       for (const part of msg.parts) {
@@ -354,21 +393,23 @@ export function convertToCoreMessages(messages: Message[]): ModelMessage[] {
           // session. The loop always persists a result (appendToolMessage),
           // so this only catches old or hand-edited sessions. The text says
           // what happened instead of inventing an outcome.
+          const text =
+            part.result === undefined
+              ? "[no result was recorded for this call; it may have been interrupted]"
+              : typeof part.result === "string"
+                ? part.result
+                : JSON.stringify(part.result);
+          const references =
+            deferredTools?.size && part.tool.tool === TOOL_SEARCH_TOOL
+              ? toolSearchOutput(text, deferredTools)
+              : undefined;
           toolResults.push({
             type: "tool-result",
             toolCallId: part.tool.id,
             toolName: part.tool.tool,
             // AI SDK v6 requires a structured ToolResultOutput, not a raw
             // string — otherwise the ModelMessage[] schema rejects it.
-            output: {
-              type: "text",
-              value:
-                part.result === undefined
-                  ? "[no result was recorded for this call; it may have been interrupted]"
-                  : typeof part.result === "string"
-                    ? part.result
-                    : JSON.stringify(part.result),
-            },
+            output: references ?? { type: "text", value: text },
           });
         }
       }
