@@ -38,7 +38,7 @@
     "@ai-sdk/togetherai": "^2.0.80",
     "@ai-sdk/vercel": "^2.0.76",
     "@ai-sdk/xai": "^3.0.130",
-    "@earendil-works/pi-codemode": "1.0.2",
+    "@earendil-works/pi-codemode": "1.1.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@openrouter/ai-sdk-provider": "^2.10.0",
     "@thisisayande/freecode-shared": "workspace:^",
