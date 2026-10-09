@@ -50,6 +50,13 @@ export function tokenize(text: string): string[] {
     .filter((t) => t.length > 2 && !STOPWORDS.has(t));
 }
 
+/** What the index reads off an entry — a MemoryEntry fits, and so does a tool. */
+export interface Bm25Entry {
+  name: string;
+  description: string;
+  content: string;
+}
+
 interface Doc {
   id: string;
   name: string;
@@ -58,20 +65,21 @@ interface Doc {
   length: number;
 }
 
-export class Bm25Index {
+export class Bm25Index<T extends Bm25Entry = MemoryEntry> {
   private docs: Doc[] = [];
   private df = new Map<string, number>();
   private avgLength = 0;
 
-  constructor(entries: MemoryEntry[] = [], idOf?: (e: MemoryEntry) => string) {
+  constructor(entries: T[] = [], idOf?: (e: T) => string) {
     if (entries.length > 0) this.build(entries, idOf);
   }
 
   // Rebuild from the current store contents. Called from the graph service's
   // sync() pass so the index is refreshed off the same entry list as the
   // embeddings — one traversal, one staleness story.
-  build(entries: MemoryEntry[], idOf?: (e: MemoryEntry) => string): void {
-    const id = idOf ?? ((e: MemoryEntry) => `${e.type}/${e.name}`);
+  build(entries: T[], idOf?: (e: T) => string): void {
+    const id =
+      idOf ?? ((e: T) => `${(e as unknown as MemoryEntry).type}/${e.name}`);
     this.docs = [];
     this.df = new Map();
 

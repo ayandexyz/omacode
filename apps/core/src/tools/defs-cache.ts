@@ -38,9 +38,17 @@ function ensureSubscribed(): void {
  */
 export const UNATTENDED_ONLY_TOOLS = new Set(["finish_iteration"]);
 
+/**
+ * Offered only while the loop is deferring MCP tools (tools/deferral.ts), so
+ * kept out of the shared list and handed to the loop by `toolSearchDef`.
+ */
+const DEFERRAL_ONLY_TOOLS = new Set(["tool_search"]);
+
 function buildAll(): ProviderToolDef[] {
   return listTools()
-    .filter((t) => !UNATTENDED_ONLY_TOOLS.has(t.id))
+    .filter(
+      (t) => !UNATTENDED_ONLY_TOOLS.has(t.id) && !DEFERRAL_ONLY_TOOLS.has(t.id),
+    )
     .map((t) => {
       const toolDef = getTool(t.id);
       return {
@@ -97,6 +105,17 @@ export function unattendedToolDefs(mode?: AgentMode): ProviderToolDef[] {
     ];
   });
   return [...getToolDefs(mode), ...extra];
+}
+
+/** The `tool_search` definition, appended by the loop when it defers tools. */
+export function toolSearchDef(): ProviderToolDef | undefined {
+  const tool = getTool("tool_search");
+  if (!tool) return undefined;
+  return {
+    name: tool.id,
+    description: tool.description,
+    parameters: tool.schemas.parameters as unknown as Record<string, unknown>,
+  };
 }
 
 export function invalidateToolDefs(): void {

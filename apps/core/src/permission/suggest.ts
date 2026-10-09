@@ -26,6 +26,7 @@ const DISPLAY_NAMES: Record<string, string> = {
   output: "Output",
   memory: "Memory",
   finish_iteration: "FinishIteration",
+  tool_search: "ToolSearch",
   mcp: "MCP",
 };
 

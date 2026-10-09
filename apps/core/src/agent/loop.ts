@@ -112,7 +112,20 @@ import {
 } from "./subagent.js";
 import { CheckpointService } from "../checkpoint/index.js";
 import type { ToolOrchestrator } from "../tools/orchestrator.js";
-import { getToolDefs, unattendedToolDefs } from "../tools/defs-cache.js";
+import {
+  getToolDefs,
+  toolSearchDef,
+  unattendedToolDefs,
+  type ProviderToolDef,
+} from "../tools/defs-cache.js";
+import {
+  applyDeferral,
+  loadDeferralSettings,
+  loadedFromHistory,
+  selectDeferred,
+  TOOL_SEARCH_TOOL,
+  type DeferralSettings,
+} from "../tools/deferral.js";
 import type { UnattendedContext } from "../autonomous/types.js";
 import { planToolBatches } from "../tools/batching.js";
 import { markReadPruned } from "../tools/read-state.js";
@@ -511,6 +524,11 @@ export class AgentLoop {
   // alone is a bounce, not a "cannot finish" (see auto-poke.ts).
   private actedSincePoke = false;
   private signalSettings?: SignalSettings;
+  // Deferred tool loading (tools/deferral.ts). Recomputed on every request;
+  // executeTool reads the last request's view, which is what the model saw.
+  private deferralSettings?: DeferralSettings;
+  private deferredTools: ReadonlySet<string> = new Set();
+  private loadedTools: ReadonlySet<string> = new Set();
   // How many times this run has given the model another turn after it
   // truncated a tool call. Capped: a model that keeps overflowing the output
   // limit must end the run, not retry forever at full prompt cost.
@@ -2378,7 +2396,7 @@ export class AgentLoop {
       : getToolDefs(this.state.agentMode);
     const tools = allowed
       ? offered.filter((t) => allowed.includes(t.name))
-      : offered;
+      : this.applyToolDeferral(offered);
 
     // Cap tool results in old history turns to prevent token explosion on long
     // sessions. The model already processed those results fully when they were
@@ -2469,6 +2487,9 @@ export class AgentLoop {
       model: resolvedModel,
       messageCount: prunedMessages.length,
       toolCount: tools.length,
+      ...(this.deferredTools.size > 0
+        ? { deferredCount: this.deferredTools.size - this.loadedTools.size }
+        : {}),
       promptChars:
         estimatePromptChars(prunedMessages, system) + ephemeralTail.length,
       streamed: Boolean(aiProvider.stream),
@@ -2930,6 +2951,35 @@ export class AgentLoop {
   }
 
   // ===========================================================================
+  // PRIVATE: applyToolDeferral()
+  // Hold MCP tools back for tool_search (spec 2026-10-10-deferred-tool-loading).
+  // Skipped for a role with an allowlist: its list is short and explicit, and
+  // tool_search would sit outside it.
+  // ===========================================================================
+  private applyToolDeferral(offered: ProviderToolDef[]): ProviderToolDef[] {
+    this.deferralSettings ??= loadDeferralSettings(this.state.projectPath);
+    const deferred = selectDeferred(offered, this.deferralSettings);
+    const loaded = loadedFromHistory(this.history, deferred);
+    // The tool list precedes the whole cached prefix, so a load re-sends it.
+    // Unavoidable and expected — documented so D2 does not call it a bust.
+    // Not on this loop's first deferring request: a resumed session's loads
+    // are already in the prefix it was cached with.
+    if (
+      this.deferredTools.size > 0 &&
+      loaded.size > this.loadedTools.size
+    ) {
+      recordInvalidation(
+        this.state.sessionId,
+        "tool load",
+        `${loaded.size - this.loadedTools.size} deferred tool(s) loaded by ${TOOL_SEARCH_TOOL}`,
+      );
+    }
+    this.deferredTools = deferred;
+    this.loadedTools = loaded;
+    return applyDeferral(offered, deferred, loaded, toolSearchDef());
+  }
+
+  // ===========================================================================
   // PRIVATE: denyToolCall()
   // The single exit for "this tool will not run". Every refusal goes through
   // here so it lands in the rollout log: a deny returns before
@@ -2986,6 +3036,19 @@ export class AgentLoop {
         toolCall,
         "role",
         `Tool ${toolCall.tool} is not available to the ${this.state.role!.name} agent. Its tools: ${roleTools.join(", ")}.`,
+      );
+    }
+
+    // A deferred tool was not declared on the request the model answered; it
+    // cannot know its schema, so the call is a guess. Send it to tool_search.
+    if (
+      this.deferredTools.has(toolCall.tool) &&
+      !this.loadedTools.has(toolCall.tool)
+    ) {
+      return this.denyToolCall(
+        toolCall,
+        "deferred",
+        `Tool ${toolCall.tool} is not loaded. Call ${TOOL_SEARCH_TOOL} to load it first; it becomes callable from your next call.`,
       );
     }
 

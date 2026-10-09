@@ -28,6 +28,8 @@ const READONLY_TOOLS = new Set([
   // Polling a background shell only reads a buffer core already holds.
   // killbash is deliberately absent: stopping a process is a side effect.
   "bashoutput",
+  // Searches tool metadata; loading a tool only declares it to the model.
+  "tool_search",
 ]);
 
 const NETWORK_TOOLS = new Set(["webfetch", "websearch"]);

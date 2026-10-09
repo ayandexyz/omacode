@@ -1,6 +1,9 @@
 # Deferred Tool Loading
 
-**Status:** Draft — not built. Branch `feat/deferred-tool-loading`.
+**Status:** Path B built 2026-10-10 on `feat/deferred-tool-loading` (§4.1–4.5,
+`deferredCount`); off by default. Not built: path A (§4.2), the MCP server
+prompt line (§4.6), `/context` deferred row, `tool.search` event (§4.7),
+the Phase 0 measurement and the Phase 4 `eval ab`.
 **Date:** 2026-10-10
 **Prior art:** pi (`earendil-works/pi`) — `packages/coding-agent/src/extensions/tool-search/`
 and `packages/ai/src/api/anthropic-messages.ts` (native tool changes).
@@ -113,8 +116,9 @@ Matches go into the session's active set; `getToolDefs` returns
 caching, because the tool list precedes everything. Mitigations:
 - loads are batched (one search returns up to 8),
 - the active set only grows within a session (no removal → at most a handful of misses),
-- `cache-miss.ts` classifies a miss whose tool list grew since the last request
-  as `tool_load`, not `harness:*`, so it does not alarm.
+- the loop records a `"tool load"` entry in the cache-invalidation journal
+  (`recordInvalidation`) when the loaded set grows, so D2 attributes the miss
+  instead of alarming — no change to `cache-miss.ts` was needed.
 
 pi's inline-tools approach (keeping misses at zero on Anthropic without server
 search) is **out of scope**: the AI SDK does not model `tool_addition` blocks,
@@ -122,20 +126,32 @@ and path A already covers Anthropic.
 
 ### 4.3 State: the active set
 
-- Stored per session in the session store meta (beside `leafId`), keyed by tool
-  name, written on change only.
-- Restored on `session.resume`, `fork`, `/tree` navigation and `/rewind` —
-  per-branch, like pi, since a branch that never searched should not inherit
-  the load.
-- Restored names are applied **after** MCP servers reconnect; a name whose tool
-  no longer exists is dropped silently (pi's resume bug, §3).
-- Subagents start with an empty active set (they get the same `tool_search`).
+**Built differently from the draft: derived, not stored.** The loaded set is
+read off the conversation on every request (`loadedFromHistory`): a
+`tool_search` result names what it loaded (`formatSearchResult` /
+`parseLoadedNames` live side by side). No session-store field, so:
+
+- resume, `fork`, `/tree` and `/rewind` carry the right per-branch set for
+  free — they all hand the loop the active path;
+- a name whose MCP server is gone falls out (it is no longer deferred), so
+  pi's resume-before-reconnect bug cannot happen;
+- compaction drops old loads. It already invalidates the prefix, and a dropped
+  tool is one search away.
+
+A *call* to a deferred tool is deliberately not evidence of a load: a call made
+before loading is refused, and that refusal sits in history too (the loop test
+caught this).
+
+- Subagents start with an empty active set (their own history).
+- A role with a tool allowlist skips deferral entirely (its list is short and
+  explicit, and `tool_search` would sit outside it).
 
 ### 4.4 Execution guard
 
 Calling a deferred tool that is not active is refused with a model-readable
 error telling it to run `tool_search` first, through the existing
-`denyToolCall()` exit (so it lands in `Trace.deniedSpans`). Permission rules,
+`denyToolCall()` exit with the new `DenySource` `"deferred"` (so it lands in
+`Trace.deniedSpans`). Permission rules,
 `PATH_TOOLS`/`URL_TOOLS`, hooks and the role allowlist are unchanged — they act
 on the call, not on how the tool was declared.
 

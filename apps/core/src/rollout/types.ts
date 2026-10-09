@@ -108,7 +108,15 @@ export interface FunctionOutputEvent extends BaseEvent {
 
 /** Which gate refused the call. Kept distinct so "the mode forbids this" and
  *  "the user said no" do not read as the same event. */
-export type DenySource = "hook" | "mode" | "rule" | "permission-hook" | "user" | "role";
+export type DenySource =
+  | "hook"
+  | "mode"
+  | "rule"
+  | "permission-hook"
+  | "user"
+  | "role"
+  /** A deferred MCP tool called before `tool_search` loaded it. */
+  | "deferred";
 
 /**
  * A tool call the model made that never ran.
@@ -205,6 +213,8 @@ export interface ModelRequestEvent extends BaseEvent {
   messageCount: number;
   /** Tool definitions offered on this call. */
   toolCount: number;
+  /** MCP tools held back for `tool_search` on this call; absent when none. */
+  deferredCount?: number;
   /** Approximate serialized prompt size; catches runaway context growth. */
   promptChars: number;
   streamed: boolean;
