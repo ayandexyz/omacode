@@ -23,6 +23,7 @@ import {
   type CodemodeTool as SandboxTool,
 } from "@earendil-works/pi-codemode";
 import { createCodemodeSandbox } from "../codemode/runtime.js";
+import { stripTrailingScriptTag } from "../codemode/source.js";
 import {
   DEFAULT_MAX_OUTPUT_TOKENS,
   formatCodemodeResult,
@@ -130,7 +131,7 @@ async function executeCodemode(
 
   let parsed;
   try {
-    parsed = parseCodemodeSource(params.script);
+    parsed = parseCodemodeSource(stripTrailingScriptTag(params.script));
   } catch (err) {
     const message =
       err instanceof CodemodeSourceError ? err.message : String(err);
