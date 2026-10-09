@@ -389,6 +389,11 @@ export interface TrialResult {
    * trial. The count of *redundant* calls: six identical greps score 5.
    */
   repeatedCalls: number;
+  /**
+   * Tool calls a codemode script made (spans with a `parentCallId`). Kept out
+   * of `repeatedCalls`; absent on reports written before it existed.
+   */
+  nestedCalls?: number;
   /** Trajectory redirections that fired during this trial. */
   redirects: number;
   /**

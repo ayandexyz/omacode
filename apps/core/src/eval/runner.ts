@@ -721,6 +721,7 @@ async function runTrialIn(
         }
       : {}),
     repeatedCalls: countRepeatedCalls(trace),
+    nestedCalls: trace.toolSpans.filter((s) => s.parentCallId).length,
     redirects: trace.redirects,
     redirectsSkipped: trace.redirectsSkipped,
     questionsRejected,
@@ -738,11 +739,18 @@ async function runTrialIn(
  * A call whose opening `function.call` was lost has no args (`trace.ts`), so it
  * keys on the tool name alone rather than silently matching every other
  * argument-less call of the same tool.
+ *
+ * Only calls the model made: a codemode script's own calls (`parentCallId`)
+ * never enter the transcript, and two scripts re-reading the same files used
+ * to score as dozens of repeats (spec 2026-10-05-codemode.md §6.2). They are
+ * counted separately in `nestedCalls`, matching `updateLoopHealth`, which
+ * likewise sees only top-level calls.
  */
-function countRepeatedCalls(trace: Trace): number {
+export function countRepeatedCalls(trace: Trace): number {
   const seen = new Set<string>();
   let repeats = 0;
   for (const [index, span] of trace.toolSpans.entries()) {
+    if (span.parentCallId) continue;
     const key = span.args
       ? `${span.tool}:${JSON.stringify(span.args)}`
       : `${span.tool}:#${index}`;

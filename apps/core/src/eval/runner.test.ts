@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyEnv } from "./runner.js";
+import { applyEnv, countRepeatedCalls } from "./runner.js";
 import type { TrialResult } from "./types.js";
 
 const KEY = "FREECODE_AUTO_COMPACT_TOKENS";
@@ -151,4 +151,22 @@ test("an unpriced teaching snapshot makes teachingCostUsd undefined", () => {
   ];
   const allPriced = teaching.every((s) => typeof s.costUsd === "number");
   assert.equal(allPriced, false);
+});
+
+test("a codemode script's own calls are not counted as repeats", () => {
+  // Two scripts re-reading the same file used to score as repeats although
+  // neither read reached the transcript (codemode spec §6.2).
+  const span = (tool: string, args: Record<string, unknown>, parentCallId?: string) =>
+    ({ tool, args, callSeq: 0, startedAt: 0, duration_ms: 0, ...(parentCallId ? { parentCallId } : {}) });
+  const trace = {
+    toolSpans: [
+      span("codemode", { script: "a" }),
+      span("read", { path: "x" }, "c1"),
+      span("codemode", { script: "b" }),
+      span("read", { path: "x" }, "c2"),
+      span("read", { path: "y" }),
+      span("read", { path: "y" }),
+    ],
+  } as unknown as Parameters<typeof countRepeatedCalls>[0];
+  assert.equal(countRepeatedCalls(trace), 1);
 });

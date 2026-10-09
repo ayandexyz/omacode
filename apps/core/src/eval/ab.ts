@@ -172,6 +172,8 @@ export interface SideTally {
   turns: number;
   /** Redundant tool calls, summed — the tell-tale of a recovery detour. */
   repeatedCalls: number;
+  /** Calls codemode scripts made, summed; absent when no trial recorded any. */
+  nestedCalls?: number;
   /** input + output tokens across all attempts. */
   tokens: number;
   /**
@@ -216,6 +218,7 @@ export function tallyOf(
     | "infra"
     | "turns"
     | "repeatedCalls"
+    | "nestedCalls"
     | "inputTokens"
     | "outputTokens"
     | "costUsd"
@@ -234,6 +237,7 @@ export function tallyOf(
     // Retain actual spend even for a trial that failed partway through.
     tally.turns += t.turns;
     tally.repeatedCalls += t.repeatedCalls;
+    if (t.nestedCalls) tally.nestedCalls = (tally.nestedCalls ?? 0) + t.nestedCalls;
     tally.tokens += t.inputTokens + t.outputTokens;
     if (t.costUsd !== undefined) tally.costUsd = (tally.costUsd ?? 0) + t.costUsd;
     if (t.costUsd === undefined || t.costPartial) {

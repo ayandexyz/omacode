@@ -376,7 +376,7 @@ const evalAbCommand: CommandModule<object, EvalAbArgs> = {
       // The efficiency totals — for a harness experiment these ARE the
       // result: quality holding is the precondition, cost moving is the point.
       const sum = (side: "baseline" | "candidate", paired = false) => {
-        let tokens = 0, turns = 0, repeated = 0, unpriced = 0;
+        let tokens = 0, turns = 0, repeated = 0, nested = 0, unpriced = 0;
         let cost: number | undefined;
         for (const c of report.cases) {
           const tally = paired ? c.comparable?.[side] : c[side];
@@ -384,10 +384,11 @@ const evalAbCommand: CommandModule<object, EvalAbArgs> = {
           tokens += tally.tokens;
           turns += tally.turns;
           repeated += tally.repeatedCalls;
+          nested += tally.nestedCalls ?? 0;
           if (tally.costUsd !== undefined) cost = (cost ?? 0) + tally.costUsd;
           unpriced += tally.unpricedTrials ?? 0;
         }
-        return { tokens, turns, repeated, cost, unpriced };
+        return { tokens, turns, repeated, nested, cost, unpriced };
       };
       const rawB = sum("baseline"), rawC = sum("candidate");
       const b = sum("baseline", true);
@@ -412,7 +413,8 @@ const evalAbCommand: CommandModule<object, EvalAbArgs> = {
           `cost ${money(b)} → ${money(cd)}` +
           (costComparable(b, cd) ? pct(b.cost!, cd.cost!) : "") +
           ` · turns ${b.turns} → ${cd.turns} · ` +
-          `repeatedCalls ${b.repeated} → ${cd.repeated}`,
+          `repeatedCalls ${b.repeated} → ${cd.repeated}` +
+          (b.nested || cd.nested ? ` · nestedCalls ${b.nested} → ${cd.nested}` : ""),
       );
       // Said every time, not only when it is convenient: this is a reported
       // signal, and the reader is the one who decides what it means.

@@ -30,6 +30,8 @@ export interface SideTotals {
   tokens: number;
   turns: number;
   repeatedCalls: number;
+  /** Calls codemode scripts made; absent when none were recorded. */
+  nestedCalls?: number;
   /** `undefined` when nothing priced — "free" and "unknown" stay distinct. */
   costUsd?: number;
   /** Trials with no price; non-zero makes `costUsd` a lower bound. */
@@ -95,6 +97,9 @@ function totalsOf(cases: AbCaseResult[], side: "baseline" | "candidate") {
     totals.tokens += c[side].tokens;
     totals.turns += c[side].turns;
     totals.repeatedCalls += c[side].repeatedCalls;
+    if (c[side].nestedCalls) {
+      totals.nestedCalls = (totals.nestedCalls ?? 0) + c[side].nestedCalls!;
+    }
     if (c[side].costUsd !== undefined) {
       totals.costUsd = (totals.costUsd ?? 0) + c[side].costUsd!;
     }
