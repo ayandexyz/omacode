@@ -20,6 +20,12 @@ import { MemoryService } from "./compaction/service.js";
 import { createLlmSummarizer } from "./compaction/llm-summarizer.js";
 import { applyCompaction } from "./session/compact-apply.js";
 import {
+  deferUserBash,
+  formatUserBash,
+  takeDeferredUserBash,
+  userBashMessage,
+} from "./session/user-bash.js";
+import {
   getProviders,
   getProviderModels,
   getModelContextLimit,
@@ -433,6 +439,16 @@ async function runSessionTurn(
     // A steer that arrived after the loop's last drain point never reached
     // the model. Re-park it as a follow-up so the user's words still get a
     // turn; the TUI already shows it as queued.
+    // `!cmd` results that ran during this turn, written now that the loop
+    // has finished appending — and before a queued follow-up loads history.
+    for (const text of takeDeferredUserBash(sessionId)) {
+      await recordUserBash(session, text).catch((err) => {
+        logger.error("Deferred user bash not recorded", {
+          sessionId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
     for (const { text, synthetic } of loop.takeUndeliveredSteers()) {
       // A notification goes back through its own path, which delivers it to
       // whichever turn comes next — or starts one once this session is idle.
@@ -550,6 +566,14 @@ async function navigateSession(
     summarized,
   });
   return { messages: nav.path, abandoned: nav.abandoned.length, summarized };
+}
+
+/** Persist a `!cmd` result where the next turn's loop will load it. */
+async function recordUserBash(session: SessionInfo, text: string): Promise<void> {
+  const store = await getSessionStore();
+  await store.appendMessage(session.id, userBashMessage(text), session.projectPath);
+  // The compaction transcript must carry it too, or a summary forgets it.
+  new MemoryService(session.id).addMessage("user", text);
 }
 
 // Per-session SSE subscriber fan-out lives in web/stream-subscribers.ts —
@@ -697,6 +721,43 @@ export const methodHandlers: Record<
       throw new Error(result.error);
     }
     return result.result as ToolCallResult;
+  },
+
+  // `!cmd` / `!!cmd` from the composer (session/user-bash.ts). Runs in the
+  // session's project and never starts a turn; `exclude` (`!!`) records
+  // nothing. A result arriving mid-turn is held until the turn ends.
+  "session.bash": async (
+    params: Record<string, unknown>,
+  ): Promise<{ output: string; exitCode: number | null; deferred: boolean }> => {
+    const { sessionId, command, exclude } = params as {
+      sessionId: string;
+      command: string;
+      exclude?: boolean;
+    };
+    const session = getSession(sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    const tool = getTool("bash");
+    if (!tool) throw new Error("Tool not found: bash");
+    const cwd = session.projectPath || process.cwd();
+    const result = await tool.execute(
+      { command, description: command },
+      { cwd, projectPath: cwd, sessionId },
+    );
+    const output = result.success
+      ? (result.result as ToolCallResult).output
+      : (result.error ?? "");
+    const exitCode = result.success
+      ? (((result.result as ToolCallResult).metadata?.exitCode as
+          | number
+          | null
+          | undefined) ?? null)
+      : null;
+    if (exclude) return { output, exitCode, deferred: false };
+    const text = formatUserBash(command, output, exitCode);
+    const busy = activeLoops.has(sessionId) || startingTurns.has(sessionId);
+    if (busy) deferUserBash(sessionId, text);
+    else await recordUserBash(session, text);
+    return { output, exitCode, deferred: busy };
   },
 
   "session.start": async (

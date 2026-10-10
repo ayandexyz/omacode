@@ -10,7 +10,6 @@ import type {
   JsonRpcRequest,
   JsonRpcResponse,
   ToolListItem,
-  ToolResult,
   SessionConfig,
   SessionMeta,
   SessionFilter,
@@ -412,13 +411,6 @@ export function stopCli(): void {
 
 export async function listTools(): Promise<ToolListItem[]> {
   return (await sendRequest("tools.list")) as ToolListItem[];
-}
-
-export async function callTool(
-  name: string,
-  args: Record<string, unknown>,
-): Promise<ToolResult> {
-  return (await sendRequest("tools.call", { name, args })) as ToolResult;
 }
 
 // =============================================================================
@@ -853,6 +845,19 @@ export async function sessionNavigate(
     messages: SerializedMessage[];
     abandoned: number;
     summarized: boolean;
+  };
+}
+
+/** `!cmd`: run in core, recorded as context for the next prompt (`exclude`: `!!`). */
+export async function sessionBash(
+  sessionId: string,
+  command: string,
+  exclude: boolean,
+): Promise<{ output: string; exitCode: number | null; deferred: boolean }> {
+  return (await sendRequest("session.bash", { sessionId, command, exclude })) as {
+    output: string;
+    exitCode: number | null;
+    deferred: boolean;
   };
 }
 

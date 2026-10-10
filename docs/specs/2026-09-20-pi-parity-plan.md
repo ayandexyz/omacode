@@ -269,6 +269,15 @@ executors; skills are prompts; MCP is out-of-process.
 | Item | Pi ref | Note |
 |------|--------|------|
 | `!cmd` runs a shell command and sends output to the model; `!!cmd` runs without sending | `agent-session.ts` BashExecution message | Persisted as its own message role so compaction can cut at it |
+
+**`!cmd` reworked 2026-10-10.** The first cut sent the output as a prompt, which
+started a turn — unlike pi and Claude Code, where it is only context for the
+user's next message. Now `session.bash` (core, `session/user-bash.ts`) runs the
+command in the session's project and persists the result as a
+`synthetic: "user_bash"` user message plus a compaction-transcript entry; no
+turn starts. Mid-turn results are held and written when the turn ends, before
+a queued follow-up loads history. Model-facing text keeps the last 20K chars.
+`!!cmd` runs through the same method and records nothing.
 | Ctrl+G opens `$VISUAL`/`$EDITOR` on the prompt buffer | `tui` editor | TUI-only |
 | Prompt templates `~/.freecode/prompts/*.md`, `{{args}}`, expand as `/name` | `prompt-templates.ts` | Loader next to skills; a template is a prompt, a skill is a capability |
 | `/share` (gist + HTML export), `/bug` | `session-export.ts`, `export-html/`, `bug-report.ts` | Export must strip secrets the way OTLP export does |

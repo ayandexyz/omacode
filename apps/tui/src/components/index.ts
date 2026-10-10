@@ -234,6 +234,13 @@ export function loadSessionMessages(messages: SerializedMessage[]): void {
       createSystemMessage("*A background task finished and was reported to the agent.*");
       continue;
     }
+    // A `!cmd` the user ran. The text is already "I ran `cmd`" + a fenced
+    // block, which reads fine as-is.
+    if (msg.synthetic === "user_bash") {
+      const text = msg.parts.map((p) => (p.type === "text" ? p.content || "" : "")).join("");
+      createSystemMessage(text);
+      continue;
+    }
     let content = "";
     if (msg.role === "user") {
       content = msg.parts

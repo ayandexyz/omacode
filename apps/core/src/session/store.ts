@@ -86,7 +86,14 @@ export interface SerializedMessage {
   // the frontend renders it as a normal user message, badged "steered".
   // "task_notification": a background task finished (agent/task-notify.ts);
   // the frontend renders a one-line notice, not the XML.
-  synthetic?: "auto_poke" | "steer" | "branch_summary" | "task_notification";
+  // "user_bash": output of a `!cmd` the user ran (session/user-bash.ts);
+  // context for their next prompt, never a turn of its own.
+  synthetic?:
+    | "auto_poke"
+    | "steer"
+    | "branch_summary"
+    | "task_notification"
+    | "user_bash";
   interrupted?: boolean;
   usage?: MessageUsage;
   /**

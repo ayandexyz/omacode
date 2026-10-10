@@ -723,6 +723,13 @@ export const METHODS = {
     params: {} as { sessionId: string; entryId: string; label: string },
     result: undefined as void,
   },
+  // `!cmd` from the composer: run in the session's project, output recorded
+  // as context for the next prompt (never a turn). `exclude` = `!!`, record
+  // nothing. `deferred`: a turn was running, so it is written when that ends.
+  "session.bash": {
+    params: {} as { sessionId: string; command: string; exclude?: boolean },
+    result: {} as { output: string; exitCode: number | null; deferred: boolean },
+  },
   // Checkpoints / rewind (spec 2026-09-23-checkpoints-rewind). A checkpoint is
   // the working tree as it stood before a user turn, keyed by that turn's
   // session-tree entry id. `session.rewind` restores the files and then
@@ -897,6 +904,7 @@ export const REQUIRED_PARAMS: Record<
   "session.tree": { sessionId: "string" },
   "session.navigate": { sessionId: "string", entryId: "string" },
   "session.label": { sessionId: "string", entryId: "string", label: "string" },
+  "session.bash": { sessionId: "string", command: "string" },
   "session.checkpoints": { sessionId: "string" },
   "session.rewindPreview": { sessionId: "string", entryId: "string" },
   "session.rewind": { sessionId: "string", entryId: "string" },

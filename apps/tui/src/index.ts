@@ -55,7 +55,7 @@ import {
   failActiveStream,
   sessionStop,
   sessionDequeue,
-  callTool,
+  sessionBash,
   extensionsList,
   extensionsReload,
   type LoadedExtensionInfo,
@@ -861,24 +861,58 @@ async function showTreePicker(): Promise<void> {
   tui.requestRender();
 }
 
+/**
+ * Start the core session lazily, on the first prompt or `!cmd`. No hardcoded
+ * provider: send only what config.json actually resolved to and let core
+ * reject an unconfigured setup, rather than quietly starting the session on a
+ * provider the user never picked.
+ */
+async function ensureSession(): Promise<SessionInfo> {
+  if (currentSession) return currentSession;
+  if (!currentProvider) {
+    try {
+      const current = await getCurrentModel();
+      if (current) {
+        currentProvider = current.provider;
+        currentModel = current.model;
+      }
+    } catch {
+      // Use defaults
+    }
+  }
+  currentSession = (await sessionStart({
+    projectPath: process.cwd(),
+    provider: currentProvider || undefined,
+    model: currentModel || undefined,
+    agentMode: currentAgentMode,
+  })) as SessionInfo;
+  return currentSession;
+}
+
 async function runBangCommand(command: string, send: boolean): Promise<void> {
   showMessage(`\`$ ${command}\``);
   let output: string;
+  let exitCode: number | null = null;
+  let deferred = false;
+  startCli();
   try {
-    const result = await callTool("bash", { command, description: command });
+    const session = await ensureSession();
+    const result = await sessionBash(session.sessionId, command, !send);
     output = result.output;
+    exitCode = result.exitCode;
+    deferred = result.deferred;
   } catch (err) {
     output = err instanceof Error ? err.message : String(err);
   }
   const shown = output.trim() || "(no output)";
   const body = shown.length > 4000 ? shown.slice(0, 4000) + "\n…" : shown;
   createSystemMessage("```\n" + body + "\n```");
+  const notes: string[] = [];
+  if (exitCode !== null && exitCode !== 0) notes.push(`exit ${exitCode}`);
+  if (!send) notes.push("not sent to the agent");
+  else if (deferred) notes.push("added to context when the current turn ends");
+  if (notes.length) createSystemMessage(`*${notes.join(" · ")}*`);
   tui.requestRender();
-  if (!send) return;
-  await submitPrompt(
-    `I ran \`${command}\` in the project. Output:\n\n\`\`\`\n${shown}\n\`\`\``,
-    `! ${command}`,
-  );
 }
 
 /**
@@ -2250,27 +2284,7 @@ async function submitPrompt(
 
   if (!currentSession) {
     try {
-      if (!currentProvider) {
-        try {
-          const current = await getCurrentModel();
-          if (current) {
-            currentProvider = current.provider;
-            currentModel = current.model;
-          }
-        } catch {
-          // Use defaults
-        }
-      }
-
-      // No hardcoded provider: send only what config.json actually resolved to
-      // and let core reject an unconfigured setup, rather than quietly starting
-      // the session on a provider the user never picked.
-      currentSession = (await sessionStart({
-        projectPath: process.cwd(),
-        provider: currentProvider || undefined,
-        model: currentModel || undefined,
-        agentMode: currentAgentMode,
-      })) as SessionInfo;
+      currentSession = await ensureSession();
     } catch (error) {
       removeMessageById(inProgressMsg.id);
       showMessage(
