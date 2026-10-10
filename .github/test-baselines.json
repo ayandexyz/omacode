@@ -1,7 +1,7 @@
 {
   "core": {
-    "tests": 1848,
-    "files": 223
+    "tests": 1854,
+    "files": 224
   },
   "tui": {
     "tests": 360,

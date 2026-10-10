@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.43.2
+
+Fewer wasted turns. The system prompt now tells the agent when to stop verifying: a test run the environment cannot do is tried once and reported, not worked around. On the trajectory eval that is 10% fewer tokens and 29 fewer turns at the same pass rate. Also: `!cmd` in the TUI records its output as context for your next prompt instead of starting a turn, and the Hommies permission bridge is verified before it sees or answers anything.
+
+### Changed
+
+- **Bounded verification in the system prompt** (`11d8c6e6`). The user's constraints now win over "fix the bug → a test that reproduces it"; a test suite the environment cannot run is tried once and reported as skipped, with no package installs, environment changes or throwaway mock scripts; `todowrite` is skipped for a fix confined to one or two files. Found on Haiku 4.5 SWE-bench traces, where freecode made 75 calls to Claude Code's 28 and every extra call came after the fix. `eval ab` on MiniMax-M3, 5 trials: trajectory 139→140 passed, tokens -10.4%, cost -9.6%, turns 370→341; coding 63→64, neutral on cost. Haiku re-run: 75→53 calls, 3/3 resolved. Ledger: `2026-10-10-trajectory-1`, `2026-10-10-coding-1`.
+- **`!cmd` adds context instead of starting a turn** (`a78c003f`), matching pi's bash mode and Claude Code's `!`. New `session.bash` IPC runs the command in the session's project and records the output as a `synthetic: "user_bash"` message for the next prompt; results that arrive mid-turn are written when the turn ends. `!!cmd` records nothing. Output kept for the model is capped at 20K chars.
+
+### Fixed
+
+- **Hommies permission bridge is verified before use** (`d6ded5cd`). The hook used to post the token and permission data to whatever port a leftover `port.json` named and apply any JSON reply as a decision, so a crashed bridge let another local user take the port and answer allow-once. It now requires `serverKey`, sends nothing until `/proc/net/tcp` shows the listener belongs to this uid, and accepts only replies carrying an HMAC of this request's nonce. Anything unverifiable counts as no bridge.
+
+### Notes
+
+Tests: core 1854/1854, TUI 360/360, typecheck clean. The Haiku comparison is 3 SWE-bench Lite tasks × 1 trial on a Claude subscription (unmetered; cost re-priced from session logs at API rates), so it shows direction, not size. New bench adapters `claude-code-haiku` / `freecode-haiku` run host-only with `--no-meter`.
+
 ## v0.43.1
 
 ChatGPT subscriptions. `freecode auth login openai` serves the `openai` provider from a ChatGPT Plus/Pro plan through the Codex backend, the same way `freecode auth login anthropic` does for Claude Pro/Max. Also: the Claude subscription login works again on newer models, and a session with an unanswered tool call no longer fails every later request.
