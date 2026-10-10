@@ -1,0 +1,20 @@
+{
+  "id": "claude-code-haiku",
+  "versionCmd": ["claude", "--version"],
+  "run": [
+    "claude",
+    "-p",
+    "{prompt}",
+    "--dangerously-skip-permissions",
+    "--model",
+    "{model}"
+  ],
+  "model": "claude-haiku-4-5",
+  "autonomy": "--dangerously-skip-permissions: all permission checks bypassed",
+  "env": {
+    "ANTHROPIC_BASE_URL": "",
+    "ANTHROPIC_API_KEY": "",
+    "ANTHROPIC_AUTH_TOKEN": ""
+  },
+  "notes": "Haiku 4.5 on the operator's Claude subscription (Claude Code's own login). Host-only, run with --no-meter: an isolated container has no credentials and the metering proxy cannot see an OAuth bill, so this matchup reports resolve rate and time, not a shared-table cost. The three blanks keep a stray shell export from rerouting the run to an API key or another endpoint."
+}

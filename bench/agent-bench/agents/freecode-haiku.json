@@ -1,0 +1,23 @@
+{
+  "id": "freecode-haiku",
+  "versionCmd": ["freecode", "--version"],
+  "run": [
+    "freecode",
+    "run",
+    "{prompt}",
+    "--model",
+    "{model}",
+    "--agent",
+    "danger",
+    "--max-turns",
+    "40"
+  ],
+  "model": "anthropic/claude-haiku-4-5",
+  "autonomy": "--agent danger: no permission prompts",
+  "env": {
+    "FREECODE_ANTHROPIC_AUTH": "oauth",
+    "ANTHROPIC_BASE_URL": "",
+    "ANTHROPIC_API_KEY": ""
+  },
+  "notes": "Haiku 4.5 on the operator's Claude subscription via freecode's anthropic OAuth auth mode (freecode auth login anthropic). Pair with claude-code-haiku; host-only, --no-meter, for the same reasons."
+}

@@ -1,0 +1,127 @@
+{
+  "slug": "claude-code-haiku-vs-freecode-haiku",
+  "generatedAt": "2026-10-10T13:28:37.573Z",
+  "runId": "2026-10-10T13-20-56-473Z",
+  "runs": [
+    {
+      "runId": "2026-10-10T13-20-56-473Z",
+      "generatedAt": "2026-10-10T13:28:37.573Z",
+      "agents": [
+        "freecode-haiku",
+        "claude-code-haiku"
+      ]
+    }
+  ],
+  "phase": 0,
+  "model": "claude-haiku-4-5",
+  "isolation": "none",
+  "graded": false,
+  "taskSet": {
+    "name": "SWE-bench Lite",
+    "repo": "django/django",
+    "instances": [
+      "django__django-11039",
+      "django__django-11099",
+      "django__django-11133"
+    ],
+    "titles": {
+      "django__django-11039": "sqlmigrate wraps it's outpout in BEGIN/COMMIT even if the database doesn't support transactional DDL",
+      "django__django-11099": "UsernameValidator allows trailing newline in usernames",
+      "django__django-11133": "HttpResponse doesn't handle memoryview objects"
+    }
+  },
+  "agents": [
+    {
+      "id": "freecode-haiku",
+      "version": "0.43.1",
+      "model": "anthropic/claude-haiku-4-5",
+      "autonomy": "--agent danger: no permission prompts"
+    },
+    {
+      "id": "claude-code-haiku",
+      "version": "2.1.283 (Claude Code)",
+      "model": "claude-haiku-4-5",
+      "autonomy": "--dangerously-skip-permissions: all permission checks bypassed"
+    }
+  ],
+  "results": [
+    {
+      "agent": "freecode-haiku",
+      "instanceId": "django__django-11039",
+      "trial": 1,
+      "producedPatch": true,
+      "resolved": null,
+      "isolation": "none",
+      "durationMs": 126247,
+      "patchBytes": 2201,
+      "newFiles": 0,
+      "reason": "ok",
+      "runId": "2026-10-10T13-20-56-473Z"
+    },
+    {
+      "agent": "claude-code-haiku",
+      "instanceId": "django__django-11039",
+      "trial": 1,
+      "producedPatch": true,
+      "resolved": null,
+      "isolation": "none",
+      "durationMs": 56116,
+      "patchBytes": 712,
+      "newFiles": 0,
+      "reason": "ok",
+      "runId": "2026-10-10T13-20-56-473Z"
+    },
+    {
+      "agent": "freecode-haiku",
+      "instanceId": "django__django-11099",
+      "trial": 1,
+      "producedPatch": true,
+      "resolved": null,
+      "isolation": "none",
+      "durationMs": 21467,
+      "patchBytes": 901,
+      "newFiles": 0,
+      "reason": "ok",
+      "runId": "2026-10-10T13-20-56-473Z"
+    },
+    {
+      "agent": "claude-code-haiku",
+      "instanceId": "django__django-11099",
+      "trial": 1,
+      "producedPatch": true,
+      "resolved": null,
+      "isolation": "none",
+      "durationMs": 20384,
+      "patchBytes": 901,
+      "newFiles": 0,
+      "reason": "ok",
+      "runId": "2026-10-10T13-20-56-473Z"
+    },
+    {
+      "agent": "freecode-haiku",
+      "instanceId": "django__django-11133",
+      "trial": 1,
+      "producedPatch": true,
+      "resolved": null,
+      "isolation": "none",
+      "durationMs": 156254,
+      "patchBytes": 1006,
+      "newFiles": 0,
+      "reason": "ok",
+      "runId": "2026-10-10T13-20-56-473Z"
+    },
+    {
+      "agent": "claude-code-haiku",
+      "instanceId": "django__django-11133",
+      "trial": 1,
+      "producedPatch": true,
+      "resolved": null,
+      "isolation": "none",
+      "durationMs": 77138,
+      "patchBytes": 1128,
+      "newFiles": 0,
+      "reason": "ok",
+      "runId": "2026-10-10T13-20-56-473Z"
+    }
+  ]
+}
